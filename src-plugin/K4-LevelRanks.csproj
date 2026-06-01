@@ -1,0 +1,69 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>$(MSBuildThisFileName)</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <TieredCompilation>true</TieredCompilation>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <AssemblyName>$(MSBuildThisFileName)</AssemblyName>
+    <OutputPath>$(MSBuildThisFileDirectory)build/</OutputPath>
+    <PublishDir>$(OutputPath)publish/$(MSBuildThisFileName)</PublishDir>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Dapper" Version="*" />
+		<PackageReference Include="Dommel" Version="*" />
+		<PackageReference Include="FluentMigrator" Version="*" />
+		<PackageReference Include="FluentMigrator.Runner.MySql" Version="*" />
+		<PackageReference Include="FluentMigrator.Runner.Postgres" Version="*" />
+		<PackageReference Include="FluentMigrator.Runner.SQLite" Version="*" />
+		<PackageReference Include="Microsoft.Data.Sqlite" Version="*" />
+		<PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="*" ExcludeAssets="runtime" PrivateAssets="all" />
+		<PackageReference Include="Microsoft.Extensions.Logging" Version="*" ExcludeAssets="runtime" PrivateAssets="all" />
+		<PackageReference Include="MySqlConnector" Version="*" />
+		<PackageReference Include="Npgsql" Version="*" />
+		<PackageReference Include="SwiftlyS2.CS2" Version="*-*" ExcludeAssets="runtime" PrivateAssets="all" />
+		<ProjectReference Include="../src-shared/K4-LevelRanksSharedApi.csproj">
+			<Private>false</Private>
+			<ExcludeAssets>runtime</ExcludeAssets>
+		</ProjectReference>
+		<None Update="resources\**\*.*" CopyToOutputDirectory="PreserveNewest" />
+	</ItemGroup>
+
+	<!-- Exclude unused FluentMigrator database providers from publish -->
+	<ItemGroup>
+		<TrimmerRootAssembly Remove="FluentMigrator.Runner.Db2" />
+		<TrimmerRootAssembly Remove="FluentMigrator.Runner.Firebird" />
+		<TrimmerRootAssembly Remove="FluentMigrator.Runner.Hana" />
+		<TrimmerRootAssembly Remove="FluentMigrator.Runner.Oracle" />
+		<TrimmerRootAssembly Remove="FluentMigrator.Runner.Redshift" />
+		<TrimmerRootAssembly Remove="FluentMigrator.Runner.Snowflake" />
+		<TrimmerRootAssembly Remove="FluentMigrator.Runner.SqlServer" />
+	</ItemGroup>
+
+	<!-- Exclude runtime folders from publish -->
+	<ItemGroup>
+		<Content Include="$(PublishDir)runtimes\**" CopyToPublishDirectory="Never" />
+	</ItemGroup>
+
+	<Target Name="CopySharedApiToExports" AfterTargets="Build">
+		<Copy SourceFiles="$(MSBuildThisFileDirectory)../src-shared/build/$(TargetFramework)/K4-LevelRanksSharedApi.dll" DestinationFolder="$(MSBuildThisFileDirectory)resources/exports/" />
+	</Target>
+
+	<Target Name="CopySharedApiToPublish" AfterTargets="Publish">
+		<Copy SourceFiles="$(MSBuildThisFileDirectory)../src-shared/build/$(TargetFramework)/K4-LevelRanksSharedApi.dll" DestinationFolder="$(PublishDir)resources/exports/" />
+	</Target>
+
+	<Target Name="RemoveRuntimeFolders" AfterTargets="Publish">
+		<RemoveDir Directories="$(PublishDir)runtimes" />
+	</Target>
+
+	<Target Name="CreateZip" AfterTargets="CopySharedApiToPublish" DependsOnTargets="CopySharedApiToPublish">
+		<ZipDirectory SourceDirectory="$(PublishDir)" DestinationFile="$(OutputPath)../$(AssemblyName).zip" Overwrite="true" />
+	</Target>
+</Project>
