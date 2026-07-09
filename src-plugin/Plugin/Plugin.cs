@@ -84,11 +84,58 @@ public sealed partial class Plugin(ISwiftlyCore core) : BasePlugin(core)
 
 	private void HandleHotReload()
 	{
-		foreach (var player in Core.PlayerManager.GetAllValidPlayers())
+		// On hot-reload, none of the events that normally bootstrap plugin state fire:
+		//   * OnMapLoad — WeaponCache stays empty → point handlers can't resolve the
+		//     weapon used for a kill/hit, so kills/hits don't credit points.
+		//   * EventPlayerActivate — pre-existing players never enter the load pipeline,
+		//     so PlayerData isn't fetched and ModifyPoints has nothing to write to.
+		//   * OnRoundPrestart — Scoreboard.UpdateAllScoreboards isn't called, but
+		//     per-player LoadPlayerDataAsync below re-populates the scoreboard cache
+		//     via UpdatePlayerScoreboard as a side effect, so this is covered.
+		// Explicitly do the equivalent setup here so a hot-reload becomes functional
+		// immediately without waiting for the next map change.
+		//
+		// The whole bootstrap defers to NextWorldUpdate: Load() runs very early in
+		// the plugin lifecycle and SwiftlyS2's internal state (PlayerManager entries,
+		// event pipes, IPlayer entity refs) may not be fully re-registered for the
+		// new plugin instance until the current world tick completes. Enumerating
+		// IPlayer at Load() time can return stale refs where SteamID reads to 0 or
+		// IsValid is false on the background thread — LoadPlayerDataAsync would
+		// then silently early-return (nothing cached) or cache under SteamID=0
+		// (real game events later see the real SteamID and getPlayerData returns
+		// null, so points fall on the floor). NextWorldUpdate matches the timing
+		// of a normal game event handler like OnPlayerActivate, which is why the
+		// per-connect load path works reliably.
+		Core.Scheduler.NextWorldUpdate(() =>
 		{
-			if (player.IsValid && !player.IsFakeClient)
-				Task.Run(() => PlayerData.LoadPlayerDataAsync(player));
-		}
+			// WeaponCache walks the game's item schema via Core.Helpers, so it must
+			// run on the main thread. Idempotent — bails if already initialized.
+			WeaponCache.Initialize();
+
+			var players = Core.PlayerManager.GetAllValidPlayers()
+				.Where(p => p.IsValid && !p.IsFakeClient)
+				.ToList();
+
+			// Broadcast RevealAll for the existing player cohort. On a plain hot-
+			// reload no EventPlayerActivate fires for players who were already
+			// connected before the reload, so without this broadcast they would
+			// lose the reveal grant until they reconnect. Cheap and idempotent.
+			Scoreboard.SendRevealAll();
+
+			// Serialize Database.InitializeAsync before the per-player loads to
+			// close the race with InitializeDatabase() above: both are Task.Run,
+			// and if a load Task runs before the DB is ready, LoadPlayerAsync
+			// throws, the exception is swallowed by LoadPlayerDataAsync's
+			// try/catch, and the player is silently untracked for the rest of
+			// the session. Awaiting is safe: InitializeAsync is idempotent.
+			Task.Run(async () =>
+			{
+				await Database.InitializeAsync();
+
+				foreach (var player in players)
+					_ = PlayerData.LoadPlayerDataAsync(player);
+			});
+		});
 	}
 
 	/* ==================== Configuration Loading ==================== */

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Microsoft.Extensions.Logging;
 using SwiftlyS2.Shared;
 using SwiftlyS2.Shared.Players;
 using SwiftlyS2.Shared.ProtobufDefinitions;
@@ -27,8 +28,24 @@ public sealed class ScoreboardService(Plugin plugin)
 	/// Cached scoreboard values computed on <c>round_prestart</c> (or immediately
 	/// when an override is set). The tick handler reads this cache and writes it to
 	/// the controller every frame so the rank icon stays visible continuously.
+	/// <c>Wins</c> is the player's real <see cref="PlayerData.GameWins"/> at cache
+	/// time — CS2's revamped scoreboard appears to fold the wins count into the
+	/// rank-icon derivation, so a stale/duplicate value (previously hardcoded to
+	/// 10 for everyone) collapsed all players to the same displayed rank.
 	/// </summary>
-	private readonly ConcurrentDictionary<ulong, (int RankId, int DisplayPoints)> _cachedRanks = new();
+	private readonly ConcurrentDictionary<ulong, (int RankId, int DisplayPoints, int Wins)> _cachedRanks = new();
+
+	/// <summary>
+	/// Mirror of what was last actually replicated to each player's client — the
+	/// post-mode-resolution <c>(RankType, RankValue, Wins)</c> triple paired with
+	/// the last <c>*Updated()</c> notify. Consulted by
+	/// <see cref="SetCompetitiveRank"/> as a change detector so the 64 Hz tick
+	/// pass only fires notifiers when the intended value diverges from what the
+	/// client has — either because the authoritative cache changed, or because
+	/// the engine / scoreboard-refresh loop cleared the controller field between
+	/// snapshots.
+	/// </summary>
+	private readonly ConcurrentDictionary<ulong, (byte RankType, int RankValue, int Wins)> _lastNotified = new();
 
 	/* ==================== Rank Overrides ==================== */
 
@@ -59,11 +76,15 @@ public sealed class ScoreboardService(Plugin plugin)
 
 	/// <summary>
 	/// Removes the cached rank entry for a player. Call on disconnect to prevent
-	/// stale data accumulating in <see cref="_cachedRanks"/>.
+	/// stale data accumulating in <see cref="_cachedRanks"/>. Also evicts the
+	/// paired <see cref="_lastNotified"/> entry — otherwise, if the same SteamID
+	/// reconnects and the engine has reset their controller fields, the change
+	/// detector would see a stale match and skip the first re-notify.
 	/// </summary>
 	public void RemoveCachedRank(ulong steamId)
 	{
 		_cachedRanks.TryRemove(steamId, out _);
+		_lastNotified.TryRemove(steamId, out _);
 		_pointOverrides.TryRemove(steamId, out _);
 	}
 
@@ -102,8 +123,12 @@ public sealed class ScoreboardService(Plugin plugin)
 		if (plugin.Config.CurrentValue.Scoreboard.UseRanks)
 			_core.Event.OnTick += ApplyAllCachedScoreboards;
 
-		if (plugin.Config.CurrentValue.Scoreboard.RevealAllInterval > 0)
-			StartRevealAllTimer();
+		// StartRevealAllTimer self-guards on RevealAllInterval <= 0 and returns
+		// without scheduling — per-connect broadcasts from OnPlayerActivate,
+		// per-round broadcasts from OnRoundPrestart, and the hot-reload broadcast
+		// cover the one-shot case, so ranks are always visible even when the
+		// periodic timer is disabled.
+		StartRevealAllTimer();
 	}
 
 	public void Stop()
@@ -119,7 +144,17 @@ public sealed class ScoreboardService(Plugin plugin)
 
 	private void StartRevealAllTimer()
 	{
-		var interval = Math.Max(plugin.Config.CurrentValue.Scoreboard.RevealAllInterval, 1f);
+		var configuredInterval = plugin.Config.CurrentValue.Scoreboard.RevealAllInterval;
+
+		// Honour config hot-reload: if the operator flips RevealAllInterval from
+		// >0 to 0 at runtime, the recursive timer stops firing. Fresh connects
+		// still get their per-player broadcast via OnPlayerActivate, so ranks
+		// stay visible for new players. Existing players keep the last grant
+		// they were sent (refreshed at round_prestart).
+		if (configuredInterval <= 0f)
+			return;
+
+		var interval = Math.Max(configuredInterval, 1f);
 
 		_core.Scheduler.DelayBySeconds(interval, () =>
 		{
@@ -131,7 +166,22 @@ public sealed class ScoreboardService(Plugin plugin)
 		});
 	}
 
-	private void SendRevealAll()
+	/// <summary>
+	/// Broadcasts <c>CCSUsrMsg_ServerRankRevealAll</c> to every connected
+	/// player, granting their client permission to render other players' rank
+	/// icons on the scoreboard. Without this grant, CS2 hides ranks for anyone
+	/// not in the viewing client's Steam friends list.
+	/// <para>
+	/// The client grant is time-limited and gets cleared on map load and other
+	/// state resets, so this is called on plugin start, on every
+	/// <c>OnPlayerActivate</c>, on <c>OnMapLoad</c>, on <c>OnRoundPrestart</c>
+	/// (natural periodic refresh tied to gameplay rhythm), on hot-reload after
+	/// existing players' data is loaded, and periodically from
+	/// <see cref="StartRevealAllTimer"/> when the operator has configured a
+	/// non-zero <c>RevealAllInterval</c>.
+	/// </para>
+	/// </summary>
+	public void SendRevealAll()
 	{
 		if (!_isRunning)
 			return;
@@ -143,9 +193,14 @@ public sealed class ScoreboardService(Plugin plugin)
 				msg.Recipients.AddAllPlayers();
 			});
 		}
-		catch
+		catch (Exception ex)
 		{
-			// Silently ignore if NetMessage fails
+			// Defensive: a future Valve protobuf schema change could make Send
+			// throw. Log at Error level so operators notice, but don't crash the
+			// caller (this runs from the reveal timer, OnPlayerActivate,
+			// OnMapLoad, OnRoundPrestart, and the hot-reload path — an uncaught
+			// exception in any of those breaks unrelated logic).
+			Plugin.Core.Logger.LogError(ex, "Send<CCSUsrMsg_ServerRankRevealAll> threw");
 		}
 	}
 
@@ -177,15 +232,26 @@ public sealed class ScoreboardService(Plugin plugin)
 	}
 
 	/// <summary>
-	/// Tick handler — writes the cached rank values to every player's controller
-	/// fields so the rank icon remains visible every frame.
-	/// No rank recalculation happens here; that is done in
-	/// <see cref="UpdateAllScoreboards"/> on <c>round_prestart</c>.
+	/// Tick handler — replays the cached rank triple for every player, gated by
+	/// the change detector in <see cref="SetCompetitiveRank"/>. In steady state
+	/// (cache unchanged, controller fields intact) this does no I/O per player
+	/// per tick beyond three field reads and a tuple compare.
 	/// <para>
-	/// Intentionally does <b>not</b> call <c>*Updated()</c> methods — doing so
-	/// every tick (64 Hz) would spam the network layer and cause CS2 to drop the
-	/// updates.  The ref-field writes are picked up by the engine's own snapshot
-	/// system on the next state update.
+	/// The detector fires the <c>*Updated()</c> notifiers when either the
+	/// intended value differs from the last-notified triple (authoritative
+	/// cache update landed — kill, round, admin command, override change) or
+	/// the controller's current fields differ from the last-notified triple
+	/// (client / engine cleared them between snapshots — the "all players
+	/// show ?" recovery path). Notifiers thus fire on the order of once per
+	/// real event per player, not 64 Hz.
+	/// </para>
+	/// <para>
+	/// The previous implementation wrote the ref fields on every tick without
+	/// firing notifiers, relying on the engine's snapshot system to pick up
+	/// the writes. Valve's scoreboard-optimization patch tightened delta
+	/// detection so silent writes are no longer replicated; the notifier IS
+	/// the replication trigger, so we now have to fire it — but only when the
+	/// value actually changed.
 	/// </para>
 	/// </summary>
 	private void ApplyAllCachedScoreboards()
@@ -203,8 +269,8 @@ public sealed class ScoreboardService(Plugin plugin)
 			if (!_cachedRanks.TryGetValue(player.SteamID, out var cached))
 				continue;
 
-			SetCompetitiveRank(player, cfg.RankMode, cached.RankId, cached.DisplayPoints,
-				cfg.CustomRankMax, cfg.CustomRankBase, cfg.CustomRankMargin, sendNetworkUpdate: false);
+			SetCompetitiveRank(player, cfg.RankMode, cached.RankId, cached.DisplayPoints, cached.Wins,
+				cfg.CustomRankMax, cfg.CustomRankBase, cfg.CustomRankMargin);
 		}
 	}
 
@@ -222,66 +288,116 @@ public sealed class ScoreboardService(Plugin plugin)
 
 		int rankId = plugin.Ranks.GetRankId(effectivePoints);
 
-		_cachedRanks[data.SteamId64] = (rankId, effectivePoints);
+		// CS2's Premier / Competitive scoreboard hides the rank icon behind a
+		// "N wins needed" placeholder for players with fewer than 10 wins on
+		// the CompetitiveWins field. Real DB-tracked match wins in
+		// `data.GameWins` start at 0 and only accrue on match end, so a fresh
+		// or low-activity player would otherwise see the placeholder instead
+		// of the rank icon their real Points already earned.
+		//
+		// Floor the field at 10 so the icon always unlocks. Real wins above
+		// 10 flow through unchanged, preserving per-player variation for the
+		// wins-count column of the scoreboard. The plugin's own DB value in
+		// `data.GameWins` is untouched — only the value written to the
+		// controller schema field is bumped.
+		int wins = Math.Max(10, data.GameWins);
 
-		// sendNetworkUpdate: true — this is the authoritative write; notify the
-		// engine so clients receive the state change immediately.
-		SetCompetitiveRank(player, cfg.RankMode, rankId, effectivePoints,
-			cfg.CustomRankMax, cfg.CustomRankBase, cfg.CustomRankMargin, sendNetworkUpdate: true);
+		_cachedRanks[data.SteamId64] = (rankId, effectivePoints, wins);
+
+		// The change detector inside SetCompetitiveRank will observe that the
+		// resolved triple diverges from _lastNotified and fire the *Updated()
+		// notifiers exactly once for this authoritative write.
+		SetCompetitiveRank(player, cfg.RankMode, rankId, effectivePoints, wins,
+			cfg.CustomRankMax, cfg.CustomRankBase, cfg.CustomRankMargin);
 	}
 
-	private static void SetCompetitiveRank(
+	/// <summary>
+	/// Resolves the mode-dependent controller display values. Pure helper — no
+	/// I/O — so it can be called from the change detector to compute the
+	/// intended triple before deciding whether to write, without duplicating
+	/// the switch. Wins is not affected by mode and flows through untouched.
+	/// </summary>
+	private static (byte RankType, int RankValue) ResolveCompetitiveDisplay(
+		int mode, int rankId, int currentPoints,
+		int rankMax, int rankBase, int rankMargin)
+	{
+		return mode switch
+		{
+			1 => ((byte)11, currentPoints),                     // Premier - show points directly
+			2 => ((byte)12, Math.Min(rankId, 18)),              // Competitive MM (ranks 1-18)
+			3 => ((byte)7,  Math.Min(rankId, 18)),              // Wingman (ranks 1-18)
+			4 => ((byte)10, Math.Min(rankId, 15)),              // Danger Zone (ranks 1-15)
+			_ => ((byte)12, Math.Max(0, rankId > rankMax        // Custom mode (0)
+				? rankBase + rankMax - rankMargin
+				: rankBase + (rankId - rankMargin - 1))),
+		};
+	}
+
+	/// <summary>
+	/// Writes the effective competitive display fields and fires the
+	/// <c>*Updated()</c> notifiers — but only when the change detector says
+	/// there is a real delta. The detector consults <see cref="_lastNotified"/>
+	/// and the controller's live field values to skip when neither has moved.
+	/// <para>
+	/// All call sites are on the main game thread (OnTick, round_prestart,
+	/// chat commands, <c>PlayerDataService</c>'s <c>NextWorldUpdate</c>
+	/// continuation, and SharedApi consumers per SwiftlyS2 convention), so no
+	/// synchronization is required around <see cref="_lastNotified"/> and no
+	/// scheduler round-trip is needed for the writes. The notifier IS the
+	/// replication trigger under Valve's tightened scoreboard delta detection
+	/// (the "FPS drop on tab open" optimization): writing the ref fields
+	/// without a matching <c>*Updated()</c> no longer marks them as changed
+	/// for the next snapshot, so notifiers have to fire on every real change.
+	/// </para>
+	/// </summary>
+	private void SetCompetitiveRank(
 		IPlayer player,
 		int mode,
 		int rankId,
 		int currentPoints,
+		int wins,
 		int rankMax,
 		int rankBase,
-		int rankMargin,
-		bool sendNetworkUpdate = true)
+		int rankMargin)
 	{
-		
-		Plugin.Core.Scheduler.NextTick(() =>
-		{			
-			if (!player.IsValid)
-				return;
-				
-			var controller = player.Controller;
-			if (controller == null)
-				return;
+		if (!player.IsValid)
+			return;
 
-			controller.CompetitiveWins = 10;
+		var controller = player.Controller;
+		if (controller == null)
+			return;
 
-			switch (mode)
-			{
-				case 1: // Premier - show points directly
-					controller.CompetitiveRanking = currentPoints;
-					controller.CompetitiveRankType = 11;
-					break;
+		var (rankType, rankValue) = ResolveCompetitiveDisplay(
+			mode, rankId, currentPoints, rankMax, rankBase, rankMargin);
+		var intended = (rankType, rankValue, wins);
 
-				case 2: // Competitive (MM ranks 1-18)
-					controller.CompetitiveRanking = Math.Min(rankId, 18);
-					controller.CompetitiveRankType = 12;
-					break;
+		// Change detector — write + notify unless ALL of these hold:
+		//   1. we have a prior notify record for this player, AND
+		//   2. our intended triple matches what we last notified, AND
+		//   3. the controller's live fields still match what we last notified
+		//      (they don't in the "all players show ?" recovery path, where
+		//      Valve's scoreboard-refresh loop clears the fields between
+		//      snapshots — detect the drift here and re-notify).
+		// If all three hold, the client already has the right values and re-
+		// firing the *Updated() notifiers 64 Hz just spams the network layer.
+		if (_lastNotified.TryGetValue(player.SteamID, out var lastNotified)
+			&& lastNotified == intended
+			&& controller.CompetitiveRanking == rankValue
+			&& controller.CompetitiveRankType == rankType
+			&& controller.CompetitiveWins == wins)
+		{
+			return;
+		}
 
-				case 3: // Wingman (ranks 1-18)
-					controller.CompetitiveRanking = Math.Min(rankId, 18);
-					controller.CompetitiveRankType = 7;
-					break;
+		controller.CompetitiveRankType = rankType;
+		controller.CompetitiveRanking = rankValue;
+		controller.CompetitiveWins = wins;
 
-				case 4: // Danger Zone (ranks 1-15)
-					controller.CompetitiveRanking = Math.Min(rankId, 15);
-					controller.CompetitiveRankType = 10;
-					break;
+		controller.CompetitiveRankTypeUpdated();
+		controller.CompetitiveRankingUpdated();
+		controller.CompetitiveWinsUpdated();
 
-				default: // Custom mode (0)
-					int calculatedRank = rankId > rankMax
-						? rankBase + rankMax - rankMargin
-						: rankBase + (rankId - rankMargin - 1);
-					controller.CompetitiveRanking = Math.Max(0, calculatedRank);
-					controller.CompetitiveRankType = 12;
-					break;
-			}
-		});
+		_lastNotified[player.SteamID] = intended;
 	}
 }
+

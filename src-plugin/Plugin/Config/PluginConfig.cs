@@ -68,7 +68,25 @@ public sealed class ScoreboardSettings
 	/// <summary>Rank margin for custom mode (mode 0)</summary>
 	public int CustomRankMargin { get; set; } = 0;
 
-	/// <summary>Interval in seconds for reveal all message (2-5 recommended)</summary>
+	/// <summary>
+	/// Interval in seconds for the periodic ServerRankRevealAll broadcast.
+	/// <para>
+	/// The RevealAll usermsg grants clients permission to see other players' rank
+	/// icons on the scoreboard — without it, clients only see their own rank and
+	/// their Steam friends'. The plugin always sends this message on every player
+	/// connect (via <c>OnPlayerActivate</c>), on every map load, on every round
+	/// prestart (natural refresh cadence tied to gameplay), and at hot-reload for
+	/// already-connected players, so ranks are always visible regardless of this
+	/// setting.
+	/// </para>
+	/// <para>
+	/// This interval only controls belt-and-suspenders periodic re-broadcasts to
+	/// all clients. <c>0</c> disables the periodic timer entirely (relying solely
+	/// on the event-driven broadcasts above, which is normally enough). <c>2-5</c>
+	/// is recommended if you want defensive re-grants in case the client-side
+	/// reveal state gets lost between snapshots.
+	/// </para>
+	/// </summary>
 	public float RevealAllInterval { get; set; } = 3.0f;
 }
 

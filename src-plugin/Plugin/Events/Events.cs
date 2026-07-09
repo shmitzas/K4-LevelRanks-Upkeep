@@ -136,6 +136,16 @@ public sealed partial class Plugin
 	private void OnMapLoad(IOnMapLoadEvent @event)
 	{
 		Core.Scheduler.DelayBySeconds(0.1f, WeaponCache.Initialize);
+
+		// Existing players stay connected across a map change but their client-
+		// side scoreboard state gets reset by the new-map load, dropping the
+		// RevealAll grant. EventPlayerActivate may or may not re-fire for the
+		// existing cohort on map change, and even when it does, the send often
+		// lands too early — before the client's fresh scoreboard is ready to
+		// honor the grant. Re-broadcast on a small delay so it lands after the
+		// client has settled on the new map. One-shot per map change; not
+		// periodic.
+		Core.Scheduler.DelayBySeconds(1.0f, () => Scoreboard.SendRevealAll());
 	}
 
 	/* ==================== Player Events ==================== */
@@ -146,6 +156,15 @@ public sealed partial class Plugin
 
 		if (player == null || !player.IsValid || player.IsFakeClient)
 			return HookResult.Continue;
+
+		// Broadcast RevealAll on every real connect so the newly-joined client
+		// (and every other connected client) has a fresh grant to render ranks
+		// on the scoreboard. This runs regardless of PlayerData load state
+		// because the reveal grant is not per-player-data — it's per-client
+		// permission — and cheap to re-issue. Covers the case where the
+		// operator sets Scoreboard.RevealAllInterval = 0 and relies solely on
+		// per-connect broadcasts.
+		Scoreboard.SendRevealAll();
 
 		// EventPlayerActivate can fire more than once per session (full updates,
 		// level transitions). Skip if the player is already loaded — re-loading
@@ -180,6 +199,18 @@ public sealed partial class Plugin
 	private HookResult OnRoundPrestart(EventRoundPrestart @event)
 	{
 		Scoreboard.UpdateAllScoreboards();
+
+		// The CS2 client's RevealAll grant has a time-limited lifetime — after
+		// a few minutes without a refresh, the client stops rendering other
+		// players' rank icons for anyone not in its Steam friends list.
+		// Piggybacking on round_prestart gives a natural refresh cadence tied
+		// to gameplay rhythm (~once per round, roughly every 1-3 min in normal
+		// play) instead of a wall-clock timer. Combined with the per-connect,
+		// per-map-load, and hot-reload broadcasts, this closes the last gap:
+		// ranks stay visible mid-session even with the periodic
+		// RevealAllInterval timer disabled.
+		Scoreboard.SendRevealAll();
+
 		return HookResult.Continue;
 	}
 
