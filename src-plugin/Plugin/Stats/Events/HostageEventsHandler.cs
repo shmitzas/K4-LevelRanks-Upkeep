@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using SwiftlyS2.Shared;
 using SwiftlyS2.Shared.GameEventDefinitions;
 using SwiftlyS2.Shared.Misc;
@@ -95,7 +96,7 @@ public sealed class HostageEventsHandler(ISwiftlyCore core, PointsConfig points,
 	// =           HELPER
 	// =========================================
 
-	private bool IsValidLoaded(IPlayer? player)
+	private bool IsValidLoaded([NotNullWhen(true)] IPlayer? player)
 	{
 		if (player == null || !player.IsValid || player.IsFakeClient)
 			return false;

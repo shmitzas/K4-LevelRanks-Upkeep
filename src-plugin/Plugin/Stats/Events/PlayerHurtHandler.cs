@@ -28,7 +28,7 @@ public sealed class PlayerHurtHandler(PluginConfig config, ModuleConfig modules,
 		var victim = @event.UserIdPlayer;
 
 		// Basic validation
-		if (attacker == null || !attacker.IsValid || !victim.IsValid)
+		if (attacker == null || !attacker.IsValid || victim == null || !victim.IsValid)
 			return HookResult.Continue;
 
 		if (attacker.IsFakeClient)
@@ -50,8 +50,8 @@ public sealed class PlayerHurtHandler(PluginConfig config, ModuleConfig modules,
 			return HookResult.Continue;
 
 		var weapon = @event.Weapon;
-		var healthDamage = @event.DmgHealth;
-		var armorDamage = @event.DmgArmor;
+		var healthDamage = @event.ActualDmgHealth;
+		var armorDamage = @event.ActualDmgArmor;
 
 		if (healthDamage <= 0 && armorDamage <= 0)
 			return HookResult.Continue;
@@ -70,7 +70,7 @@ public sealed class PlayerHurtHandler(PluginConfig config, ModuleConfig modules,
 		// Hitbox data
 		if (modules.HitStatsEnabled)
 		{
-			var hitgroup = @event.HitGroup;
+			var hitgroup = (int)@event.ActualHitGroup;
 			attackerData.HitData.RecordHit(hitgroup, healthDamage, armorDamage);
 		}
 

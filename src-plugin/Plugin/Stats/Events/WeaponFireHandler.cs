@@ -26,7 +26,7 @@ public sealed class WeaponFireHandler(ModuleConfig modules, Func<IPlayer, Player
 
 		var player = @event.UserIdPlayer;
 
-		if (!player.IsValid || player.IsFakeClient)
+		if (player is null || !player.IsValid || player.IsFakeClient)
 			return HookResult.Continue;
 
 		var data = getPlayerData(player);

@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using SwiftlyS2.Shared;
 using SwiftlyS2.Shared.GameEventDefinitions;
 using SwiftlyS2.Shared.Misc;
@@ -56,7 +57,7 @@ public sealed class BombEventsHandler(ISwiftlyCore core, PointsConfig points, Fu
 			if (!IsValidLoaded(player))
 				continue;
 
-			if (defuser.IsValid && player.SteamID == defuser.SteamID)
+			if (defuser is { IsValid: true } && player.SteamID == defuser.SteamID)
 				continue;
 
 			// Team 3 = CounterTerrorist
@@ -125,7 +126,7 @@ public sealed class BombEventsHandler(ISwiftlyCore core, PointsConfig points, Fu
 	// =           HELPER
 	// =========================================
 
-	private bool IsValidLoaded(IPlayer? player)
+	private bool IsValidLoaded([NotNullWhen(true)] IPlayer? player)
 	{
 		if (player == null || !player.IsValid || player.IsFakeClient)
 			return false;

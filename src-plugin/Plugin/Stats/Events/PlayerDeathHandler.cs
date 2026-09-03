@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using SwiftlyS2.Shared.GameEventDefinitions;
 using SwiftlyS2.Shared.Misc;
 using SwiftlyS2.Shared.Players;
@@ -38,23 +39,23 @@ public sealed class PlayerDeathHandler(PluginConfig config, PointsConfig points,
 		// Determine kill type
 		var isSuicide = attacker is null || !attacker.IsValid || attacker.SteamID == victim?.SteamID;
 		var isTeamKill = !isSuicide && !config.Rank.FFAMode &&
-			attacker.IsValid && victim.IsValid &&
+			attacker?.IsValid == true && victim?.IsValid == true &&
 			attacker.Controller?.Team == victim.Controller?.Team;
-		var isBotKill = victim.IsFakeClient;
+		var isBotKill = victim?.IsFakeClient ?? false;
 		var isValidKill = !isSuicide && !isTeamKill && (!isBotKill || config.Rank.PointsForBots);
 
 		// =========================================
 		// =           VICTIM PROCESSING
 		// =========================================
 
-		if (victimData?.IsLoaded == true)
+		if (victimData?.IsLoaded == true && victim != null)
 		{
 			if (isSuicide)
 			{
 				// Suicide
 				ProcessPoints(victim, points.Suicide, "k4.reason.suicide");
 			}
-			else if (!isTeamKill && attacker.IsValid)
+			else if (!isTeamKill && attacker?.IsValid == true)
 			{
 				// Normal death
 				var multiplier = CalculateDynamicMultiplier(victimData.Points, attackerData?.Points ?? 0);
@@ -73,9 +74,9 @@ public sealed class PlayerDeathHandler(PluginConfig config, PointsConfig points,
 		// =           ATTACKER PROCESSING
 		// =========================================
 
-		if (attackerData?.IsLoaded == true && attacker.IsValid && !isSuicide)
+		if (attackerData?.IsLoaded == true && attacker?.IsValid == true && !isSuicide)
 		{
-			var victimName = victim.Controller?.PlayerName;
+			var victimName = victim?.Controller?.PlayerName;
 
 			if (isTeamKill)
 			{
@@ -113,9 +114,9 @@ public sealed class PlayerDeathHandler(PluginConfig config, PointsConfig points,
 		// =           ASSISTER PROCESSING
 		// =========================================
 
-		if (assisterData?.IsLoaded == true && assister.IsValid)
+		if (assisterData?.IsLoaded == true && assister?.IsValid == true)
 		{
-			var isTeamAssist = !config.Rank.FFAMode && victim.IsValid &&
+			var isTeamAssist = !config.Rank.FFAMode && victim?.IsValid == true &&
 				assister.Controller?.Team == victim.Controller?.Team;
 
 			if (@event.AssistedFlash)
@@ -252,7 +253,7 @@ public sealed class PlayerDeathHandler(PluginConfig config, PointsConfig points,
 		modifyPoints(player, points, key, true, info);
 	}
 
-	private static bool IsValidPlayer(IPlayer? player) =>
+	private static bool IsValidPlayer([NotNullWhen(true)] IPlayer? player) =>
 		player?.IsValid == true && !player.IsFakeClient;
 
 	private double CalculateDynamicMultiplier(int playerPoints, int otherPoints)

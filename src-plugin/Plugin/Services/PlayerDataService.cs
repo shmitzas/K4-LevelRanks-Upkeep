@@ -131,7 +131,7 @@ public sealed partial class Plugin
 				return new PlayerData
 				{
 					Steam = steamId,
-					Name = SanitizeName(player?.Controller?.PlayerName),
+					Name = SanitizeName(player?.Controller?.PlayerName) ?? "",
 					Value = startPoints,
 					Rank = _plugin.Ranks.GetRankId(startPoints),
 					IsLoaded = true,
