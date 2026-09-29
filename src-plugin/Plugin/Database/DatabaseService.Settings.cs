@@ -11,12 +11,6 @@ public sealed partial class Plugin
 	public sealed partial class DatabaseService
 	{
 		// =========================================
-		// =           CONSTANTS
-		// =========================================
-
-		internal const string SettingsTableName = "lvl_base_settings";
-
-		// =========================================
 		// =           LOAD OPERATIONS
 		// =========================================
 

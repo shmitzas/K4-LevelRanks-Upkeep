@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Table prefix** ([#2](https://github.com/shmitzas/K4-LevelRanks-Upkeep/issues/2)): new `Database.TablePrefix` config option, empty by default
+  - Prefixes every table the plugin owns (`awp_` gives `awp_lvl_base`, `awp_lvl_base_settings`, ...), so several game modes can share one database instead of needing a database each
+  - Each prefix gets its own `VersionInfo` migration ledger, index and constraint names, so prefixed servers create and upgrade their schema independently
+  - Rejected at startup if it contains anything other than letters, digits and underscores
+  - Empty prefix keeps the stock LVL Ranks names, so existing installs are unaffected
+
 ## [v1.1.1]
 
 ### Fixed

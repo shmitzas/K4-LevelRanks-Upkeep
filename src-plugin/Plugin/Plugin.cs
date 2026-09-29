@@ -63,6 +63,7 @@ public sealed partial class Plugin(ISwiftlyCore core) : BasePlugin(core)
 	{
 		Database = new DatabaseService(
 			Config.CurrentValue.Database.Connection,
+			Config.CurrentValue.Database.TablePrefix,
 			Config.CurrentValue.Database.PurgeDays,
 			Config.CurrentValue.Rank.StartPoints,
 			Modules.CurrentValue

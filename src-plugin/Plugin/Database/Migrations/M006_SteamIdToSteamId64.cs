@@ -13,12 +13,12 @@ namespace K4Ranks.Database.Migrations;
 public class M006_SteamIdToSteamId64 : Migration
 {
 	// Table name → steam column name
-	private static readonly (string Table, string Column)[] Tables =
+	private static (string Table, string Column)[] Tables =>
 	[
-		("lvl_base",          "steam"),
-		("lvl_base_settings", "steam"),
-		("lvl_base_weapons",  "steam"),
-		("lvl_base_hits",     "SteamID"),
+		(TableNames.Base,     "steam"),
+		(TableNames.Settings, "steam"),
+		(TableNames.Weapons,  "steam"),
+		(TableNames.Hits,     "SteamID"),
 	];
 
 	public override void Up()

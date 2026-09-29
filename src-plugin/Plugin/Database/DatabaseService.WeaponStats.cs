@@ -9,12 +9,6 @@ public sealed partial class Plugin
 	public sealed partial class DatabaseService
 	{
 		// =========================================
-		// =           CONSTANTS
-		// =========================================
-
-		internal const string WeaponStatsTableName = "lvl_base_weapons";
-
-		// =========================================
 		// =           LOAD OPERATIONS
 		// =========================================
 

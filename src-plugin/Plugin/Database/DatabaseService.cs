@@ -14,11 +14,10 @@ public sealed partial class Plugin
 		/* ==================== Fields ==================== */
 
 		private readonly string _connectionName;
+		private readonly string _tablePrefix;
 		private readonly int _purgeDays;
 		private readonly int _startPoints;
 		private readonly ModuleConfig _modules;
-
-		internal const string TableName = "lvl_base";
 
 		/* ==================== Properties ==================== */
 
@@ -26,9 +25,10 @@ public sealed partial class Plugin
 
 		/* ==================== Constructor ==================== */
 
-		public DatabaseService(string connectionName, int purgeDays, int startPoints, ModuleConfig modules)
+		public DatabaseService(string connectionName, string tablePrefix, int purgeDays, int startPoints, ModuleConfig modules)
 		{
 			_connectionName = connectionName;
+			_tablePrefix = tablePrefix;
 			_purgeDays = purgeDays;
 			_startPoints = startPoints;
 			_modules = modules;
@@ -40,6 +40,11 @@ public sealed partial class Plugin
 		{
 			try
 			{
+				// Both hooks are global and must be in place before the first query. Every
+				// public method here is gated on IsEnabled, which stays false until they are.
+				TableNames.Configure(_tablePrefix);
+				DommelMapper.SetTableNameResolver(new PrefixedTableNameResolver());
+
 				// Run FluentMigrator migrations
 				using var connection = Core.Database.GetConnection(_connectionName);
 				MigrationRunner.RunMigrations(connection);
@@ -57,13 +62,13 @@ public sealed partial class Plugin
 
 		private void LogInitializedTables()
 		{
-			var tables = new List<string> { TableName, SettingsTableName };
+			var tables = new List<string> { TableNames.Base, TableNames.Settings };
 
 			if (_modules.WeaponStatsEnabled)
-				tables.Add(WeaponStatsTableName);
+				tables.Add(TableNames.Weapons);
 
 			if (_modules.HitStatsEnabled)
-				tables.Add(HitsTableName);
+				tables.Add(TableNames.Hits);
 
 			Core.Logger.LogInformation("Database initialized with migrations. Tables: {Tables}", string.Join(", ", tables));
 		}

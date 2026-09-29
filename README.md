@@ -109,6 +109,7 @@
 | Section        | Option               | Description                                 | Default                 |
 | -------------- | -------------------- | ------------------------------------------- | ----------------------- |
 | **Database**   | `Connection`         | Database connection name                    | `"host"`                |
+|                | `TablePrefix`        | Prefix for this server's tables (see below) | `""`                    |
 |                | `PurgeDays`          | Days to keep inactive records (0 = forever) | `30`                    |
 | **Rank**       | `StartPoints`        | Starting points for new players             | `0`                     |
 |                | `MinPlayers`         | Minimum players for points to be awarded    | `4`                     |
@@ -188,6 +189,35 @@ The plugin uses LVL Ranks compatible database tables:
 - `lvl_base_settings` - Player preferences
 - `lvl_base_weapons` - Weapon statistics (optional)
 - `lvl_base_hits` - Hit statistics (optional)
+
+### Separate Ranks per Server (`TablePrefix`)
+
+By default `TablePrefix` is empty and the table names above are used as-is.
+
+Set it to give a server its own set of tables so several game modes can share one
+database instead of needing a database each:
+
+```json
+{
+  "Database": {
+    "Connection": "host",
+    "TablePrefix": "awp_"
+  }
+}
+```
+
+| `TablePrefix` | Tables used                                                                  |
+| ------------- | ---------------------------------------------------------------------------- |
+| `""`          | `lvl_base`, `lvl_base_settings`, `lvl_base_weapons`, `lvl_base_hits`         |
+| `"awp_"`      | `awp_lvl_base`, `awp_lvl_base_settings`, `awp_lvl_base_weapons`, `awp_lvl_base_hits` |
+
+- The prefix is used **literally** - include the separator yourself (`"awp_"`, not `"awp"`).
+- Only letters, digits and underscores are allowed; anything else is rejected at startup.
+- Each prefix gets its own `VersionInfo` table, so prefixed servers create and upgrade
+  their schema independently of each other.
+- Changing the prefix points the server at a different (possibly empty) set of tables -
+  it does not move existing data. Rename the tables yourself if you want to keep it.
+- Takes effect on server restart.
 
 ### Supported Databases
 

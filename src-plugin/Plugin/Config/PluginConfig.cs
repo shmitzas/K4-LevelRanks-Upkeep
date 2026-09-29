@@ -19,6 +19,13 @@ public sealed class DatabaseSettings
 	/// <summary>DB connection name (from SwiftlyS2's database.jsonc)</summary>
 	public string Connection { get; set; } = "host";
 
+	/// <summary>
+	/// Optional prefix applied to every table this plugin owns, so several servers can
+	/// share one database (e.g. "awp_" gives awp_lvl_base). Empty keeps the stock LVL
+	/// Ranks names. Letters, digits and underscores only.
+	/// </summary>
+	public string TablePrefix { get; set; } = "";
+
 	/// <summary>Days to keep inactive player records (0 = forever)</summary>
 	public int PurgeDays { get; set; } = 30;
 }

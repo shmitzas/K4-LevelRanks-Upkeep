@@ -11,10 +11,10 @@ public class M001_CoreTables : Migration
 {
 	public override void Up()
 	{
-		if (Schema.Table("lvl_base").Exists())
+		if (Schema.Table(TableNames.Base).Exists())
 			return;
 
-		Create.Table("lvl_base")
+		Create.Table(TableNames.Base)
 			.WithColumn("steam").AsString(32).NotNullable().PrimaryKey()
 			.WithColumn("name").AsString(64).NotNullable().WithDefaultValue("")
 			.WithColumn("value").AsInt32().NotNullable().WithDefaultValue(0)
@@ -36,15 +36,17 @@ public class M001_CoreTables : Migration
 			.WithColumn("rounds_played").AsInt32().NotNullable().WithDefaultValue(0)
 			.WithColumn("damage").AsInt64().NotNullable().WithDefaultValue(0);
 
-		Create.Index("idx_value").OnTable("lvl_base").OnColumn("value").Descending();
-		Create.Index("idx_visiblerank").OnTable("lvl_base").OnColumn("rank");
-		Create.Index("idx_lastconnect").OnTable("lvl_base").OnColumn("lastconnect");
+		// Index names are schema-scoped on PostgreSQL and database-scoped on SQLite,
+		// so they collide between prefixes unless they carry the prefix too.
+		Create.Index(TableNames.Prefix + "idx_value").OnTable(TableNames.Base).OnColumn("value").Descending();
+		Create.Index(TableNames.Prefix + "idx_visiblerank").OnTable(TableNames.Base).OnColumn("rank");
+		Create.Index(TableNames.Prefix + "idx_lastconnect").OnTable(TableNames.Base).OnColumn("lastconnect");
 
 		// =========================================
 		// =           SETTINGS TABLE
 		// =========================================
 
-		Create.Table("lvl_base_settings")
+		Create.Table(TableNames.Settings)
 			.WithColumn("steam").AsString(32).NotNullable().PrimaryKey()
 			.WithColumn("messages").AsBoolean().NotNullable().WithDefaultValue(true)
 			.WithColumn("summary").AsBoolean().NotNullable().WithDefaultValue(false)
@@ -53,7 +55,7 @@ public class M001_CoreTables : Migration
 
 	public override void Down()
 	{
-		Delete.Table("lvl_base_settings");
-		Delete.Table("lvl_base");
+		Delete.Table(TableNames.Settings);
+		Delete.Table(TableNames.Base);
 	}
 }

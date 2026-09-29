@@ -19,13 +19,13 @@ public class M004_ExtendNameColumn : Migration
 		// session allows the ALTER to proceed without charset validation.
 		// The SESSION-level change disappears when the connection closes.
 		IfDatabase("MySql5").Execute.Sql("SET SESSION sql_mode = '';");
-		Alter.Table("lvl_base")
+		Alter.Table(TableNames.Base)
 			.AlterColumn("name").AsString(128).NotNullable().WithDefaultValue("");
 	}
 
 	public override void Down()
 	{
-		Alter.Table("lvl_base")
+		Alter.Table(TableNames.Base)
 			.AlterColumn("name").AsString(64).NotNullable().WithDefaultValue("");
 	}
 }

@@ -11,10 +11,10 @@ public class M003_HitStatsTable : Migration
 {
 	public override void Up()
 	{
-		if (Schema.Table("lvl_base_hits").Exists())
+		if (Schema.Table(TableNames.Hits).Exists())
 			return;
 
-		Create.Table("lvl_base_hits")
+		Create.Table(TableNames.Hits)
 			.WithColumn("SteamID").AsString(32).NotNullable().PrimaryKey()
 			.WithColumn("DmgHealth").AsInt64().NotNullable().WithDefaultValue(0)
 			.WithColumn("DmgArmor").AsInt64().NotNullable().WithDefaultValue(0)
@@ -30,6 +30,6 @@ public class M003_HitStatsTable : Migration
 
 	public override void Down()
 	{
-		Delete.Table("lvl_base_hits");
+		Delete.Table(TableNames.Hits);
 	}
 }

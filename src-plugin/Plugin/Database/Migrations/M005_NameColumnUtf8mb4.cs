@@ -29,17 +29,17 @@ public class M005_NameColumnUtf8mb4 : Migration
 		// The SESSION-level sql_mode does not persist after the connection closes.
 		IfDatabase("MySql5").Execute.Sql("SET SESSION sql_mode = '';");
 		IfDatabase("MySql5").Execute.Sql(
-			"ALTER TABLE `lvl_base` MODIFY COLUMN `name` VARBINARY(512);"
+			$"ALTER TABLE `{TableNames.Base}` MODIFY COLUMN `name` VARBINARY(512);"
 		);
 		IfDatabase("MySql5").Execute.Sql(
-			"ALTER TABLE `lvl_base` MODIFY COLUMN `name` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '';"
+			$"ALTER TABLE `{TableNames.Base}` MODIFY COLUMN `name` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '';"
 		);
 	}
 
 	public override void Down()
 	{
 		IfDatabase("MySql5").Execute.Sql(
-			"ALTER TABLE `lvl_base` MODIFY COLUMN `name` VARCHAR(128) CHARACTER SET utf8mb3 COLLATE utf8mb3_general_ci NOT NULL DEFAULT '';"
+			$"ALTER TABLE `{TableNames.Base}` MODIFY COLUMN `name` VARCHAR(128) CHARACTER SET utf8mb3 COLLATE utf8mb3_general_ci NOT NULL DEFAULT '';"
 		);
 	}
 }
