@@ -9,6 +9,8 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>K4-LevelRanksSharedApi</AssemblyName>
     <OutputPath>$(MSBuildThisFileDirectory)build/</OutputPath>
+    <!-- Consumed as a ProjectReference and shipped inside the plugin's resources/exports/. -->
+    <IsPublishable>false</IsPublishable>
   </PropertyGroup>
 
   <ItemGroup>

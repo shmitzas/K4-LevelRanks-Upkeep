@@ -35,35 +35,25 @@
 		<None Update="resources\**\*.*" CopyToOutputDirectory="PreserveNewest" />
 	</ItemGroup>
 
-	<!-- Exclude unused FluentMigrator database providers from publish -->
-	<ItemGroup>
-		<TrimmerRootAssembly Remove="FluentMigrator.Runner.Db2" />
-		<TrimmerRootAssembly Remove="FluentMigrator.Runner.Firebird" />
-		<TrimmerRootAssembly Remove="FluentMigrator.Runner.Hana" />
-		<TrimmerRootAssembly Remove="FluentMigrator.Runner.Oracle" />
-		<TrimmerRootAssembly Remove="FluentMigrator.Runner.Redshift" />
-		<TrimmerRootAssembly Remove="FluentMigrator.Runner.Snowflake" />
-		<TrimmerRootAssembly Remove="FluentMigrator.Runner.SqlServer" />
-	</ItemGroup>
-
-	<!-- Exclude runtime folders from publish -->
-	<ItemGroup>
-		<Content Include="$(PublishDir)runtimes\**" CopyToPublishDirectory="Never" />
-	</ItemGroup>
+	<!-- SQLite ships native binaries for 23 RIDs (~30 MB). A CS2 dedicated server is
+	     only ever linux-x64 or win-x64, so the rest are dead weight in the drop-in zip. -->
+	<Target Name="TrimForeignRuntimeAssets" AfterTargets="ComputeResolvedFilesToPublishList">
+		<ItemGroup>
+			<ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="$([MSBuild]::ValueOrDefault('%(ResolvedFileToPublish.RelativePath)', '').Replace('\', '/').StartsWith('runtimes/')) AND !$([MSBuild]::ValueOrDefault('%(ResolvedFileToPublish.RelativePath)', '').Replace('\', '/').StartsWith('runtimes/linux-x64/')) AND !$([MSBuild]::ValueOrDefault('%(ResolvedFileToPublish.RelativePath)', '').Replace('\', '/').StartsWith('runtimes/win-x64/'))" />
+		</ItemGroup>
+	</Target>
 
 	<Target Name="CopySharedApiToExports" AfterTargets="Build">
 		<Copy SourceFiles="$(MSBuildThisFileDirectory)../src-shared/build/$(TargetFramework)/K4-LevelRanksSharedApi.dll" DestinationFolder="$(MSBuildThisFileDirectory)resources/exports/" />
 	</Target>
 
-	<Target Name="CopySharedApiToPublish" AfterTargets="Publish">
+	<Target Name="CopySharedApiToPublish" AfterTargets="Publish" BeforeTargets="CreateZip">
 		<Copy SourceFiles="$(MSBuildThisFileDirectory)../src-shared/build/$(TargetFramework)/K4-LevelRanksSharedApi.dll" DestinationFolder="$(PublishDir)resources/exports/" />
 	</Target>
 
-	<Target Name="RemoveRuntimeFolders" AfterTargets="Publish">
-		<RemoveDir Directories="$(PublishDir)runtimes" />
-	</Target>
-
-	<Target Name="CreateZip" AfterTargets="CopySharedApiToPublish" DependsOnTargets="CopySharedApiToPublish">
-		<ZipDirectory SourceDirectory="$(PublishDir)" DestinationFile="$(OutputPath)../$(AssemblyName).zip" Overwrite="true" />
+	<!-- Publishes to build/publish/K4-LevelRanks/ (drop straight into the plugins
+	     folder) and zips the parent so the archive root holds that same folder. -->
+	<Target Name="CreateZip" AfterTargets="Publish">
+		<ZipDirectory SourceDirectory="$(PublishDir)../" DestinationFile="$(OutputPath)../$(AssemblyName).zip" Overwrite="true" />
 	</Target>
 </Project>
