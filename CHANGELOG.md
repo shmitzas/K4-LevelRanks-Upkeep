@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.3.1]
+
+### Fixed
+
+- **Missing `lvl_base_settings` table**: `Table 'x.lvl_base_settings' doesn't exist` on every player connect
+  - The core migration bailed out as soon as it saw an existing `lvl_base`, so it never created the settings table or the `lvl_base` indexes - yet was still recorded as applied, leaving them permanently missing
+  - Hit anyone pointing the plugin at an existing LVL Ranks database (the documented upgrade path), and anyone whose first migration run failed after `lvl_base` was created
+  - Each object is now checked for existence on its own, and a repair migration creates whatever is missing on databases that already recorded the old one
+- **Database users without DDL permissions**: a failed migration no longer disables the plugin outright
+  - Shared hosting commonly grants `SELECT`/`INSERT`/`UPDATE`/`DELETE` but not `CREATE`/`ALTER`/`INDEX`, which made every startup fail with a bare "Failed to initialize database" even when the tables existed and were perfectly usable
+  - Startup now verifies the tables it actually needs (honouring the module toggles) and keeps running when they are all usable, logging a warning that future schema changes will not be applied
+  - When a required table really is missing, the error names it and says which permissions to grant instead of just dumping a stack trace
+
 ## [v1.3.0]
 
 ### Added

@@ -231,6 +231,17 @@ database instead of needing a database each:
 
 **Automatic Schema Management**: The plugin uses FluentMigrator to automatically create and update database tables. Optional modules (WeaponStats, HitStats) only create their tables when enabled.
 
+### Database Permissions
+
+Automatic schema management needs `CREATE`, `ALTER` and `INDEX` in addition to the usual
+`SELECT`, `INSERT`, `UPDATE` and `DELETE`. Shared hosting often grants only the latter.
+
+Without them the plugin still runs, as long as the tables it needs are already there -
+it logs a warning that migrations could not be applied and carries on. Only if a
+required table is missing or unreadable does it disable itself, naming the tables in
+question so you can either grant the missing rights or create them by hand (the schema
+is LVL Ranks compatible, so an existing LVL Ranks database works as-is).
+
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 ---
