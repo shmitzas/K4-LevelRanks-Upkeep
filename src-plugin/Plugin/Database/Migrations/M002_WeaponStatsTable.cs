@@ -14,9 +14,13 @@ public class M002_WeaponStatsTable : Migration
 		if (Schema.Table(TableNames.Weapons).Exists())
 			return;
 
+		// Declared inline rather than through Create.PrimaryKey: that emits
+		// ALTER TABLE ... ADD CONSTRAINT, which SQLite rejects outright. Unnamed so
+		// PostgreSQL derives the name from the table and prefixed installs cannot collide.
+		// Its leftmost prefix also serves the per-player lookup, so no separate steam index.
 		Create.Table(TableNames.Weapons)
-			.WithColumn("steam").AsString(32).NotNullable()
-			.WithColumn("classname").AsString(64).NotNullable()
+			.WithColumn("steam").AsString(32).NotNullable().PrimaryKey()
+			.WithColumn("classname").AsString(64).NotNullable().PrimaryKey()
 			.WithColumn("kills").AsInt32().NotNullable().WithDefaultValue(0)
 			// K4 Extensions
 			.WithColumn("deaths").AsInt32().NotNullable().WithDefaultValue(0)
@@ -24,16 +28,6 @@ public class M002_WeaponStatsTable : Migration
 			.WithColumn("hits").AsInt64().NotNullable().WithDefaultValue(0)
 			.WithColumn("shots").AsInt64().NotNullable().WithDefaultValue(0)
 			.WithColumn("damage").AsInt64().NotNullable().WithDefaultValue(0);
-
-		// Constraint and index names are schema-scoped on PostgreSQL and database-scoped
-		// on SQLite, so they collide between prefixes unless they carry the prefix too.
-		Create.PrimaryKey(TableNames.Prefix + "pk_lvl_base_weapons")
-			.OnTable(TableNames.Weapons)
-			.Columns("steam", "classname");
-
-		Create.Index(TableNames.Prefix + "idx_weapons_steam")
-			.OnTable(TableNames.Weapons)
-			.OnColumn("steam");
 	}
 
 	public override void Down()

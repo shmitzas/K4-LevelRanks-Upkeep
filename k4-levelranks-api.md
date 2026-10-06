@@ -195,7 +195,7 @@ _k4Api.SetPlayerPoints(player, 0);
 
 ### Rankings
 
-Both methods are asynchronous because they query the database.
+Both methods are asynchronous because they query the database. They read saved values, which trail the live game by up to one save (at most 60 seconds, or the end of the current round, whichever comes first), so a position does not yet include points earned since then. A player who has just joined for the first time has no row until their first save.
 
 #### `GetPlayerPositionAsync`
 

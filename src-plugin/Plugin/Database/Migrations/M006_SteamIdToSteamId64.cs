@@ -1,7 +1,5 @@
 using System.Data;
 using FluentMigrator;
-using MySqlConnector;
-using Npgsql;
 
 namespace K4Ranks.Database.Migrations;
 
@@ -21,26 +19,35 @@ public class M006_SteamIdToSteamId64 : Migration
 		(TableNames.Hits,     "SteamID"),
 	];
 
+	private enum Dialect { MySql, Postgres, Sqlite }
+
+	/// <remarks>
+	/// Dispatched through IfDatabase rather than by testing the connection's CLR type.
+	/// FluentMigrator opens its own connection through its own reflectively-loaded ADO.NET
+	/// provider, so a type the migration does not recognise used to fall through to the
+	/// SQLite branch and run SQLite-only string functions against MySQL.
+	/// "PostgreSQL" is the alias to match: AddPostgres() reports a version-stamped
+	/// DatabaseType (PostgreSQL15_0), so "Postgres" silently matches nothing.
+	/// </remarks>
 	public override void Up()
 	{
-		Execute.WithConnection((connection, transaction) =>
+		IfDatabase("MySql5").Execute.WithConnection((c, t) => ConvertSteamIds(c, t, Dialect.MySql));
+		IfDatabase("PostgreSQL").Execute.WithConnection((c, t) => ConvertSteamIds(c, t, Dialect.Postgres));
+		IfDatabase("SQLite").Execute.WithConnection((c, t) => ConvertSteamIds(c, t, Dialect.Sqlite));
+	}
+
+	private static void ConvertSteamIds(IDbConnection connection, IDbTransaction? transaction, Dialect dialect)
+	{
+		foreach (var (table, column) in Tables)
 		{
-			bool isMySql   = connection is MySqlConnection;
-			bool isPostgres = connection is NpgsqlConnection;
+			if (!TableExists(connection, transaction, table, dialect))
+				continue;
 
-			foreach (var (table, column) in Tables)
-			{
-				if (!TableExists(connection, transaction, table, isMySql, isPostgres))
-					continue;
-
-				var sql = BuildConvertSql(table, column, isMySql, isPostgres);
-
-				using var cmd = connection.CreateCommand();
-				cmd.Transaction = transaction;
-				cmd.CommandText = sql;
-				cmd.ExecuteNonQuery();
-			}
-		});
+			using var cmd = connection.CreateCommand();
+			cmd.Transaction = transaction;
+			cmd.CommandText = BuildConvertSql(table, column, dialect);
+			cmd.ExecuteNonQuery();
+		}
 	}
 
 	public override void Down()
@@ -49,16 +56,23 @@ public class M006_SteamIdToSteamId64 : Migration
 		// Down migration is intentionally left empty.
 	}
 
+	/// <summary>
+	/// Scoped to the current database/schema: an unqualified information_schema lookup
+	/// also matches a same-named table owned by somebody else on a shared server, and the
+	/// UPDATE that follows would then run against a table that is not there.
+	/// </summary>
 	private static bool TableExists(
 		IDbConnection connection,
 		IDbTransaction? transaction,
 		string table,
-		bool isMySql,
-		bool isPostgres)
+		Dialect dialect)
 	{
-		string sql = isMySql || isPostgres
-			? $"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '{table}'"
-			: $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'";
+		string sql = dialect switch
+		{
+			Dialect.MySql => $"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '{table}'",
+			Dialect.Postgres => $"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = '{table}'",
+			_ => $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'"
+		};
 
 		using var cmd = connection.CreateCommand();
 		cmd.Transaction = transaction;
@@ -73,9 +87,9 @@ public class M006_SteamIdToSteamId64 : Migration
 	///   where STEAM_X:Y:Z — Y is auth bit, Z is account number.
 	/// Only rows whose column still matches the STEAM_ prefix are touched.
 	/// </summary>
-	private static string BuildConvertSql(string table, string column, bool isMySql, bool isPostgres)
+	private static string BuildConvertSql(string table, string column, Dialect dialect)
 	{
-		if (isMySql)
+		if (dialect == Dialect.MySql)
 		{
 			// SUBSTRING_INDEX is MySQL-specific
 			return
@@ -88,7 +102,7 @@ public class M006_SteamIdToSteamId64 : Migration
 				$"WHERE `{column}` LIKE 'STEAM_%'";
 		}
 
-		if (isPostgres)
+		if (dialect == Dialect.Postgres)
 		{
 			// split_part is PostgreSQL-specific
 			return

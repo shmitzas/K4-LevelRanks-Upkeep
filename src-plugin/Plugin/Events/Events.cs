@@ -18,6 +18,9 @@ public sealed partial class Plugin
 	private RoundEventsHandler? _roundEventsHandler;
 	private PlaytimeReward? _playtimeReward;
 
+	private const float SaveIntervalSeconds = 60f;
+	private CancellationTokenSource? _saveTimerCts;
+
 	/* ==================== Event Registration ==================== */
 
 	private void RegisterEvents()
@@ -31,26 +34,29 @@ public sealed partial class Plugin
 		RegisterPlayerEvents();
 		RegisterStatEvents();
 		RegisterRoundEvents();
+
+		StartSaveTimer();
 	}
 
 	private void InitializeEventHandlers()
 	{
 		_playerDeathHandler = new PlayerDeathHandler(
 			Config.CurrentValue, Points.CurrentValue, Modules.CurrentValue,
-			PlayerData.GetPlayerData,
+			() => Config.CurrentValue,
+			PlayerData.Resolve,
 			PlayerData.ModifyPoints,
 			ShouldProcessPoints
 		);
 
 		_playerHurtHandler = new PlayerHurtHandler(
 			Config.CurrentValue, Modules.CurrentValue,
-			PlayerData.GetPlayerData,
+			PlayerData.Resolve,
 			ShouldProcessPoints
 		);
 
 		_weaponFireHandler = new WeaponFireHandler(
 			Modules.CurrentValue,
-			PlayerData.GetPlayerData,
+			PlayerData.Resolve,
 			ShouldProcessPoints
 		);
 
@@ -129,6 +135,7 @@ public sealed partial class Plugin
 		Core.GameEvent.HookPost<EventRoundPrestart>(OnRoundPrestart);
 		Core.GameEvent.HookPost<EventRoundStart>(OnRoundStart);
 		Core.GameEvent.HookPost<EventRoundEnd>(OnRoundEnd);
+		Core.GameEvent.HookPost<EventCsWinPanelMatch>(OnWinPanelMatch);
 	}
 
 	/* ==================== Map Events ==================== */
@@ -154,7 +161,8 @@ public sealed partial class Plugin
 	{
 		var player = Core.PlayerManager.GetPlayer(@event.UserId);
 
-		if (player == null || !player.IsValid || player.IsFakeClient)
+		// No IsValid gate: it needs a pawn, which a just-activated player may not have yet.
+		if (player == null || player.IsFakeClient)
 			return HookResult.Continue;
 
 		// Broadcast RevealAll on every real connect so the newly-joined client
@@ -166,32 +174,20 @@ public sealed partial class Plugin
 		// per-connect broadcasts.
 		Scoreboard.SendRevealAll();
 
-		// EventPlayerActivate can fire more than once per session (full updates,
-		// level transitions). Skip if the player is already loaded — re-loading
-		// would overwrite the in-memory record with the DB row and silently
-		// discard any points earned since the original load.
-		if (PlayerData.IsPlayerLoaded(player.SteamID))
-			return HookResult.Continue;
-
-		Task.Run(() => PlayerData.LoadPlayerDataAsync(player));
+		// Idempotent: a repeated activate never reloads over a live record.
+		PlayerData.EnsureLoaded(player);
 		return HookResult.Continue;
 	}
 
 	private void OnClientDisconnected(IOnClientDisconnectedEvent @event)
 	{
+		// No IsValid gate: the pawn is often gone by now (spectator, dead), which used to skip the save.
 		var player = Core.PlayerManager.GetPlayer(@event.PlayerId);
-
-		if (player == null || !player.IsValid || player.IsFakeClient)
+		if (PlayerData.Resolve(player) is not { IsBot: false, SteamId: not 0 and var steamId })
 			return;
 
-		var steamId = player.SteamID; // Capture before Task.Run to avoid ObjectDisposedException
-
-		Task.Run(async () =>
-		{
-			await PlayerData.SavePlayerDataAsync(steamId);
-			PlayerData.RemovePlayer(steamId);
-			Scoreboard.RemoveCachedRank(steamId);
-		});
+		PlayerData.MarkDeparted(steamId);
+		Scoreboard.RemoveCachedRank(steamId);
 	}
 
 	/* ==================== Round Events ==================== */
@@ -230,43 +226,77 @@ public sealed partial class Plugin
 		// Process round end for players (summary, killstreak reset)
 		ProcessRoundEndForPlayers();
 
-		// Save all player data
-		Task.Run(() => PlayerData.SaveAllPlayersAsync());
+		// A round boundary is a natural save point; the timer covers long rounds.
+		PlayerData.RequestSave();
 
 		return HookResult.Continue;
 	}
 
+	private HookResult OnWinPanelMatch(EventCsWinPanelMatch @event)
+	{
+		// A map change may follow immediately; don't wait for the timer.
+		PlayerData.RequestSave();
+
+		return HookResult.Continue;
+	}
+
+	private void StartSaveTimer()
+	{
+		// Jittered first tick so servers restarted together don't save in lockstep.
+		var firstDelay = SaveIntervalSeconds * (0.5f + Random.Shared.NextSingle());
+
+		_saveTimerCts = Core.Scheduler.DelayAndRepeatBySeconds(firstDelay, SaveIntervalSeconds, () =>
+		{
+			PlayerData.LoadMissingPlayers();
+			PlayerData.RequestSave();
+		});
+	}
+
+	private void StopSaveTimer()
+	{
+		_saveTimerCts?.Cancel();
+		_saveTimerCts = null;
+	}
+
 	private void ProcessRoundEndForPlayers()
 	{
+		var points = Config.CurrentValue.Points;
+		if (!points.KillstreakResetOnRoundEnd && !points.RoundEndSummary)
+			return;
+
 		foreach (var player in Core.PlayerManager.GetAllValidPlayers())
 		{
-			if (!player.IsValid || player.IsFakeClient)
-				continue;
-
+			// GetAllValidPlayers already filters IsValid, and bots never get a record.
 			var data = PlayerData.GetPlayerData(player);
 			if (data == null || !data.IsLoaded)
 				continue;
 
-			if (Config.CurrentValue.Points.KillstreakResetOnRoundEnd)
+			if (points.KillstreakResetOnRoundEnd)
 				data.ResetKillstreak();
 
-			if (Config.CurrentValue.Points.RoundEndSummary)
+			if (points.RoundEndSummary)
 				PlayerData.ShowRoundSummary(player);
 		}
 	}
 
 	/* ==================== Helpers ==================== */
 
+	// weapon_fire / player_hurt / player_death each ask this, dozens of times a second in
+	// a gunfight. Warmup state and the human count can't meaningfully move inside a tick.
+	private const long PointsGateWindowMs = 15;
+	private long _pointsGateCheckedAt = -PointsGateWindowMs;
+	private bool _pointsGateOpen;
+
 	private bool ShouldProcessPoints()
 	{
-		if (IsWarmup && !Config.CurrentValue.Rank.WarmupPoints)
-			return false;
+		var now = Environment.TickCount64;
+		if (now - _pointsGateCheckedAt < PointsGateWindowMs)
+			return _pointsGateOpen;
 
-		var playerCount = Core.PlayerManager
-			.GetAllValidPlayers()
-			.Count(p => p.IsValid && !p.IsFakeClient);
-
-		return playerCount >= Config.CurrentValue.Rank.MinPlayers;
+		var rank = Config.CurrentValue.Rank;
+		_pointsGateOpen = (rank.WarmupPoints || !IsWarmup) && PlayerData.CountValidHumans() >= rank.MinPlayers;
+		_pointsGateCheckedAt = now;
+		return _pointsGateOpen;
 	}
 
 	private void CheckPlaytimeRewards()

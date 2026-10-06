@@ -1,8 +1,7 @@
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
+using System.Data;
 using Dommel;
-using Microsoft.Extensions.Logging;
-using MySqlConnector;
 
 namespace K4Ranks;
 
@@ -14,101 +13,9 @@ public sealed partial class Plugin
 		// =           LOAD OPERATIONS
 		// =========================================
 
-		public async Task<PlayerSettings?> LoadPlayerSettingsAsync(string steamId)
-		{
-			if (!IsEnabled)
-				return null;
-
-			try
-			{
-				using var connection = Core.Database.GetConnection(_connectionName);
-				connection.Open();
-
-				return await connection.GetAsync<PlayerSettings>(steamId);
-			}
-			catch (Exception ex)
-			{
-				Core.Logger.LogError(ex, "Failed to load settings for {Steam}", steamId);
-				return null;
-			}
-		}
-
-		// =========================================
-		// =           SAVE OPERATIONS
-		// =========================================
-
-		public async Task SavePlayerSettingsAsync(string steamId, PlayerSettings settings)
-		{
-			if (!IsEnabled)
-				return;
-
-			try
-			{
-				settings.Steam = steamId;
-
-				using var connection = Core.Database.GetConnection(_connectionName);
-				connection.Open();
-
-				var updated = await connection.UpdateAsync(settings);
-				if (!updated)
-				{
-					try
-					{
-						await connection.InsertAsync(settings);
-					}
-					catch (MySqlException ex) when (ex.Number == 1062)
-					{
-						await connection.UpdateAsync(settings);
-					}
-				}
-
-				settings.IsDirty = false;
-			}
-			catch (Exception ex)
-			{
-				Core.Logger.LogError(ex, "Failed to save settings for {Steam}", steamId);
-			}
-		}
-
-		public async Task SaveAllPlayerSettingsAsync(IEnumerable<(string Steam, PlayerSettings Settings)> playerSettings)
-		{
-			if (!IsEnabled)
-				return;
-
-			var dirty = playerSettings.Where(p => p.Settings.IsDirty).ToList();
-			if (dirty.Count == 0)
-				return;
-
-			try
-			{
-				using var connection = Core.Database.GetConnection(_connectionName);
-				connection.Open();
-
-				foreach (var (steam, settings) in dirty)
-				{
-					settings.Steam = steam;
-
-					var updated = await connection.UpdateAsync(settings);
-					if (!updated)
-					{
-						try
-						{
-							await connection.InsertAsync(settings);
-						}
-						catch (MySqlException ex) when (ex.Number == 1062)
-						{
-							await connection.UpdateAsync(settings);
-						}
-					}
-
-					settings.IsDirty = false;
-				}
-			}
-			catch (Exception ex)
-			{
-				Core.Logger.LogError(ex, "Failed to batch save player settings");
-			}
-		}
+		/// <summary>Null when the player has no settings row. Throws on database errors.</summary>
+		private static Task<PlayerSettings?> LoadSettingsAsync(IDbConnection connection, string steamId)
+			=> connection.GetAsync<PlayerSettings>(steamId);
 	}
 }
 
@@ -136,6 +43,26 @@ public sealed class PlayerSettings
 	[Column("rankchanges")]
 	public bool RankChanges { get; set; } = true;
 
-	[Ignore]
-	public bool IsDirty { get; set; } = false;
+	// A version, not a dirty flag: menu clicks can run off the game thread, so a flag cleared
+	// by a save could swallow a change made while that save was reading.
+	private int _version;
+	private int _syncedVersion;
+	private int _sentVersion;
+
+	internal void Touch() => Interlocked.Increment(ref _version);
+
+	internal void MarkSynced() => _syncedVersion = Volatile.Read(ref _version);
+
+	internal bool HasPendingChanges() => Volatile.Read(ref _version) != _syncedVersion;
+
+	/// <summary>The row when changed since the last committed save; otherwise null.</summary>
+	internal PlayerSettings? BuildChange(string steam)
+	{
+		_sentVersion = Volatile.Read(ref _version);
+		return _sentVersion == _syncedVersion
+			? null
+			: new PlayerSettings { Steam = steam, Messages = Messages, Summary = Summary, RankChanges = RankChanges };
+	}
+
+	internal void AcknowledgeSync() => _syncedVersion = _sentVersion;
 }

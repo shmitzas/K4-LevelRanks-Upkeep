@@ -1,6 +1,6 @@
+using Dapper;
 using Dommel;
 using Microsoft.Extensions.Logging;
-using MySqlConnector;
 
 namespace K4Ranks;
 
@@ -13,13 +13,11 @@ public sealed partial class Plugin
 		// =========================================
 
 		/// <summary>
-		/// Loads a player row from the database.
-		/// Returns the row if found, or <c>null</c> if no row exists for the given SteamID.
-		/// Throws on transient/database errors so callers can distinguish "new player"
-		/// from "load failed" — critical to avoid overwriting a real row with default
-		/// starting points after a transient DB hiccup.
+		/// Loads all four of a player's tables. <see cref="PlayerRecord.Base"/> is null when no row
+		/// exists for the SteamID. Throws when any read fails, so callers never build a partial record
+		/// whose next absolute save would overwrite the real rows.
 		/// </summary>
-		public async Task<PlayerData?> LoadPlayerAsync(string steamId)
+		public async Task<PlayerRecord> LoadPlayerAsync(string steamId)
 		{
 			if (!IsEnabled)
 				throw new InvalidOperationException("Database is not enabled");
@@ -36,7 +34,12 @@ public sealed partial class Plugin
 
 					// Returns null when no row matches the primary key — this is a
 					// legitimate "new player" signal and should NOT trigger a retry.
-					return await connection.GetAsync<PlayerData>(steamId);
+					var player = await connection.GetAsync<PlayerData>(steamId);
+					var settings = await LoadSettingsAsync(connection, steamId);
+					var weapons = await LoadWeaponStatsAsync(connection, steamId);
+					var hits = await LoadHitDataAsync(connection, steamId);
+
+					return new PlayerRecord(player, settings, weapons, hits);
 				}
 				catch (Exception ex)
 				{
@@ -50,94 +53,8 @@ public sealed partial class Plugin
 				}
 			}
 
-			Core.Logger.LogError(lastError, "Failed to load player {Steam} after {Max} attempts", steamId, maxAttempts);
+			Core.Logger.LogError(lastError, "Failed to load player {Steam} after {Max} attempts; not tracked until a retry succeeds (within a minute)", steamId, maxAttempts);
 			throw lastError!;
-		}
-
-		// =========================================
-		// =           SAVE OPERATIONS
-		// =========================================
-
-		/// <summary>
-		/// Saves a player row using UPDATE-first semantics. If no row was updated
-		/// (i.e., the player is genuinely new), falls back to INSERT. This ordering
-		/// is safer than INSERT-then-UPDATE because a duplicate-PK INSERT can mask
-		/// a corrupt/default in-memory record being written over a real DB row.
-		/// </summary>
-		public async Task SavePlayerAsync(PlayerData data)
-		{
-			if (!IsEnabled)
-				return;
-
-			try
-			{
-				data.LastConnect = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-
-				using var connection = Core.Database.GetConnection(_connectionName);
-				connection.Open();
-
-				var updated = await connection.UpdateAsync(data);
-				if (!updated)
-				{
-					try
-					{
-						await connection.InsertAsync(data);
-					}
-					catch (MySqlException ex) when (ex.Number == 1062)
-					{
-						// Race: row was created between UPDATE and INSERT — retry update.
-						await connection.UpdateAsync(data);
-					}
-				}
-
-				data.IsDirty = false;
-			}
-			catch (Exception ex)
-			{
-				Core.Logger.LogError(ex, "Failed to save player {Steam}", data.Steam);
-			}
-		}
-
-		public async Task SavePlayersAsync(IEnumerable<PlayerData> players)
-		{
-			if (!IsEnabled)
-				return;
-
-			var dirty = players.Where(p => p.IsDirty && p.IsLoaded).ToList();
-			if (dirty.Count == 0)
-				return;
-
-			try
-			{
-				var now = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-
-				using var connection = Core.Database.GetConnection(_connectionName);
-				connection.Open();
-
-				foreach (var data in dirty)
-				{
-					data.LastConnect = now;
-
-					var updated = await connection.UpdateAsync(data);
-					if (!updated)
-					{
-						try
-						{
-							await connection.InsertAsync(data);
-						}
-						catch (MySqlException ex) when (ex.Number == 1062)
-						{
-							await connection.UpdateAsync(data);
-						}
-					}
-
-					data.IsDirty = false;
-				}
-			}
-			catch (Exception ex)
-			{
-				Core.Logger.LogError(ex, "Failed to batch save players");
-			}
 		}
 
 		// =========================================
@@ -159,7 +76,7 @@ public sealed partial class Plugin
 				if (player == null)
 					return -1;
 
-				// Count players with higher value + 1
+				// Count players with higher value + 1 (served by idx_value)
 				var higherCount = await connection.CountAsync<PlayerData>(p => p.Value > player.Value);
 				return (int)higherCount + 1;
 			}
@@ -185,7 +102,7 @@ public sealed partial class Plugin
 				if (player == null)
 					return -1;
 
-				// Count players with higher playtime + 1
+				// Count players with higher playtime + 1 (served by idx_playtime)
 				var higherCount = await connection.CountAsync<PlayerData>(p => p.Playtime > player.Playtime);
 				return (int)higherCount + 1;
 			}
@@ -222,13 +139,7 @@ public sealed partial class Plugin
 
 			try
 			{
-				using var connection = Core.Database.GetConnection(_connectionName);
-				connection.Open();
-
-				var allPlayers = await connection.GetAllAsync<PlayerData>();
-				return [.. allPlayers
-					.OrderByDescending(p => p.Value)
-					.Take(count)];
+				return await QueryTopPlayersAsync(nameof(K4Ranks.PlayerData.Value), count);
 			}
 			catch (Exception ex)
 			{
@@ -244,19 +155,33 @@ public sealed partial class Plugin
 
 			try
 			{
-				using var connection = Core.Database.GetConnection(_connectionName);
-				connection.Open();
-
-				var allPlayers = await connection.GetAllAsync<PlayerData>();
-				return [.. allPlayers
-					.OrderByDescending(p => p.Playtime)
-					.Take(count)];
+				return await QueryTopPlayersAsync(nameof(K4Ranks.PlayerData.Playtime), count);
 			}
 			catch (Exception ex)
 			{
 				Core.Logger.LogError(ex, "Failed to get top players by time");
 				return [];
 			}
+		}
+
+		/// <summary>
+		/// <c>ORDER BY ... DESC LIMIT</c>, valid on all three engines. Columns are aliased to the
+		/// property names so Dapper maps them regardless of the column naming.
+		/// </summary>
+		private async Task<List<PlayerData>> QueryTopPlayersAsync(string orderProperty, int count)
+		{
+			using var connection = Core.Database.GetConnection(_connectionName);
+			connection.Open();
+
+			var sql = DommelMapper.GetSqlBuilder(connection);
+			var type = typeof(PlayerData);
+
+			var columns = Resolvers.Properties(type)
+				.Select(p => $"{Resolvers.Column(p.Property, sql, false)} AS {sql.QuoteIdentifier(p.Property.Name)}");
+			var orderBy = Resolvers.Column(type.GetProperty(orderProperty)!, sql, false);
+
+			var query = $"SELECT {string.Join(", ", columns)} FROM {Resolvers.Table(type, sql)} ORDER BY {orderBy} DESC LIMIT {sql.PrefixParameter("Count")}";
+			return [.. await connection.QueryAsync<PlayerData>(query, new { Count = count })];
 		}
 	}
 }

@@ -19,13 +19,20 @@ public class M004_ExtendNameColumn : Migration
 		// session allows the ALTER to proceed without charset validation.
 		// The SESSION-level change disappears when the connection closes.
 		IfDatabase("MySql5").Execute.Sql("SET SESSION sql_mode = '';");
-		Alter.Table(TableNames.Base)
+
+		// SQLite has no ALTER TABLE ... ALTER COLUMN at all, and ignores declared string
+		// lengths anyway, so there is nothing to widen there.
+		// "PostgreSQL" is the alias to match: AddPostgres() reports a version-stamped
+		// DatabaseType (PostgreSQL15_0), so "Postgres" silently matches nothing.
+		IfDatabase("MySql5", "PostgreSQL")
+			.Alter.Table(TableNames.Base)
 			.AlterColumn("name").AsString(128).NotNullable().WithDefaultValue("");
 	}
 
 	public override void Down()
 	{
-		Alter.Table(TableNames.Base)
+		IfDatabase("MySql5", "PostgreSQL")
+			.Alter.Table(TableNames.Base)
 			.AlterColumn("name").AsString(64).NotNullable().WithDefaultValue("");
 	}
 }

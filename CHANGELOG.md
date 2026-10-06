@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.4.0]
+
+### Added
+
+- **Table prefix position**: new `Database.TablePrefixPosition` option - `"before"` (default) gives `awp_lvl_base`, `"after"` gives `lvl_base_awp`
+  - `"after"` adds the separating underscore for you, so `"awp"` and `"awp_"` behave the same
+  - Invalid values are rejected at startup instead of quietly using a different set of tables
+
+### Changed
+
+- **Lower server CPU usage**: hot paths do far less work each tick, with no change in behaviour
+  - Scoreboard ranks are resolved ahead of time and only re-resolved when something actually changes
+  - Each player's SteamID and bot flag are read once per connection and reused by every stat handler
+  - Player names are only built when a point message will actually show them
+- **Saving rebuilt around a single background writer** (see README "Saving")
+  - Saves every 60 s, at round end, at match end and on disconnect - never two at once
+  - Each player is saved in one transaction; a failed save is retried instead of dropped
+  - Changes made while a save is running are kept for the next one instead of being lost
+  - Unload waits at most 8 seconds for the final save instead of hanging on an unreachable database
+- **Faster leaderboards**: `!top` and `!toptime` query only the rows they display instead of reading the whole table
+
+### Fixed
+
+- **SQLite never worked**: a fresh install created no tables and disabled the plugin; all three engines now work as documented
+- **PostgreSQL skipped three migrations**, including the SteamID conversion
+- **Duplicate weapon stats** on existing LVL Ranks databases: a new migration adds the key the save path needs
+- **Shared hosting**: a migration could pick up a same-named table from another database on the server
+- **Progress lost on disconnect**: players who disconnected while dead or spectating were never saved
+- **Progress lost on a failed save**: the record was dropped instead of retried
+- **Stale data on quick reconnect**: reconnecting before the last save landed loaded the old row
+- **Weapon and hit stats overwritten** after a failed read, which was treated as "no data"
+- **Players connecting before the database was ready** stayed untracked for the whole session
+- **`!resetmyrank` racing the save**: a save in flight could undo the reset
+- `setpoints` and the API's `SetPlayerPoints` now update the stored rank id along with the points
+
 ## [v1.3.1]
 
 ### Fixed

@@ -24,9 +24,7 @@ public sealed class PlaytimeReward(ISwiftlyCore core, PointsConfig points, Func<
 
 		foreach (var player in core.PlayerManager.GetAllValidPlayers())
 		{
-			if (!player.IsValid || player.IsFakeClient)
-				continue;
-
+			// GetAllValidPlayers already filters IsValid, and bots never get a record.
 			var data = getPlayerData(player);
 			if (data == null || !data.IsLoaded)
 				continue;

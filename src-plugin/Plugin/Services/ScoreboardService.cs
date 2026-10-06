@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using SwiftlyS2.Shared;
 using SwiftlyS2.Shared.Players;
 using SwiftlyS2.Shared.ProtobufDefinitions;
@@ -16,6 +17,10 @@ public sealed class ScoreboardService(Plugin plugin)
 	private readonly ISwiftlyCore _core = Plugin.Core;
 	private bool _isRunning;
 
+	// Mirrors Scoreboard.UseRanks so the tick does no config read; refreshed on config change.
+	private volatile bool _useRanks;
+	private IDisposable? _configListener;
+
 	/// <summary>
 	/// Per-player virtual point overrides.
 	/// When set, both the displayed rank icon and the displayed point value are
@@ -26,8 +31,8 @@ public sealed class ScoreboardService(Plugin plugin)
 
 	/// <summary>
 	/// Cached scoreboard values computed on <c>round_prestart</c> (or immediately
-	/// when an override is set). The tick handler reads this cache and writes it to
-	/// the controller every frame so the rank icon stays visible continuously.
+	/// when an override is set). The tick handler replays them, through
+	/// <see cref="_slotRanks"/>, every frame so the rank icon stays visible continuously.
 	/// <c>Wins</c> is the player's real <see cref="PlayerData.GameWins"/> at cache
 	/// time — CS2's revamped scoreboard appears to fold the wins count into the
 	/// rank-icon derivation, so a stale/duplicate value (previously hardcoded to
@@ -35,17 +40,40 @@ public sealed class ScoreboardService(Plugin plugin)
 	/// </summary>
 	private readonly ConcurrentDictionary<ulong, (int RankId, int DisplayPoints, int Wins)> _cachedRanks = new();
 
+	private const int MaxSlots = 64;
+
 	/// <summary>
-	/// Mirror of what was last actually replicated to each player's client — the
-	/// post-mode-resolution <c>(RankType, RankValue, Wins)</c> triple paired with
-	/// the last <c>*Updated()</c> notify. Consulted by
-	/// <see cref="SetCompetitiveRank"/> as a change detector so the 64 Hz tick
-	/// pass only fires notifiers when the intended value diverges from what the
-	/// client has — either because the authoritative cache changed, or because
-	/// the engine / scoreboard-refresh loop cleared the controller field between
-	/// snapshots.
+	/// Slot-indexed view of <see cref="_cachedRanks"/> with the controller triple
+	/// already resolved, so the tick does no SteamID, config or IsValid work.
+	/// Also carries the last triple actually replicated to the client (the
+	/// <c>Notified*</c> fields) — the change detector consulted by
+	/// <see cref="ApplyCompetitiveRank"/> so the 64 Hz pass only fires notifiers
+	/// when the intended value diverges from what the client has — either because
+	/// the authoritative cache changed, or because the engine / scoreboard-refresh
+	/// loop cleared the controller field between snapshots.
+	/// Game thread only.
 	/// </summary>
-	private readonly ConcurrentDictionary<ulong, (byte RankType, int RankValue, int Wins)> _lastNotified = new();
+	private readonly SlotRank[] _slotRanks = new SlotRank[MaxSlots];
+
+	// Bumped from any thread when _cachedRanks or the config changes; every slot
+	// re-resolves on the next tick.
+	private int _rankVersion;
+	private int _tickCount;
+
+	private struct SlotRank
+	{
+		public IPlayer? Player;
+		public int Version;
+		public bool HasRank;
+		public byte RankType;
+		public int RankValue;
+		public int Wins;
+
+		public bool HasNotified;
+		public byte NotifiedRankType;
+		public int NotifiedRankValue;
+		public int NotifiedWins;
+	}
 
 	/* ==================== Rank Overrides ==================== */
 
@@ -76,16 +104,15 @@ public sealed class ScoreboardService(Plugin plugin)
 
 	/// <summary>
 	/// Removes the cached rank entry for a player. Call on disconnect to prevent
-	/// stale data accumulating in <see cref="_cachedRanks"/>. Also evicts the
-	/// paired <see cref="_lastNotified"/> entry — otherwise, if the same SteamID
-	/// reconnects and the engine has reset their controller fields, the change
-	/// detector would see a stale match and skip the first re-notify.
+	/// stale data accumulating in <see cref="_cachedRanks"/>. The slot's notified
+	/// mirror resets on its own when a reconnect brings a new player object, so a
+	/// reconnect whose controller fields were reset by the engine is re-notified.
 	/// </summary>
 	public void RemoveCachedRank(ulong steamId)
 	{
 		_cachedRanks.TryRemove(steamId, out _);
-		_lastNotified.TryRemove(steamId, out _);
 		_pointOverrides.TryRemove(steamId, out _);
+		Interlocked.Increment(ref _rankVersion);
 	}
 
 	/* ==================== Per-Player Refresh ==================== */
@@ -100,11 +127,9 @@ public sealed class ScoreboardService(Plugin plugin)
 		if (!plugin.Config.CurrentValue.Scoreboard.UseRanks)
 			return;
 
-		if (!player.IsValid || player.IsFakeClient)
-			return;
-
+		// Bots never get a record, so loaded data also means "human".
 		var data = plugin.PlayerData.GetPlayerData(player);
-		if (data == null || !data.IsLoaded)
+		if (data == null || !data.IsLoaded || !player.IsValid)
 			return;
 
 		var cfg = plugin.Config.CurrentValue.Scoreboard;
@@ -120,7 +145,10 @@ public sealed class ScoreboardService(Plugin plugin)
 
 		_isRunning = true;
 
-		if (plugin.Config.CurrentValue.Scoreboard.UseRanks)
+		_useRanks = plugin.Config.CurrentValue.Scoreboard.UseRanks;
+		_configListener = plugin.Config.OnChange(OnConfigChanged);
+
+		if (_useRanks)
 			_core.Event.OnTick += ApplyAllCachedScoreboards;
 
 		// StartRevealAllTimer self-guards on RevealAllInterval <= 0 and returns
@@ -138,6 +166,18 @@ public sealed class ScoreboardService(Plugin plugin)
 
 		_isRunning = false;
 		_core.Event.OnTick -= ApplyAllCachedScoreboards;
+
+		_configListener?.Dispose();
+		_configListener = null;
+	}
+
+	// Runs on the options reload thread: only volatile / Interlocked writes here.
+	private void OnConfigChanged(PluginConfig config)
+	{
+		_useRanks = config.Scoreboard.UseRanks;
+
+		// RankMode / CustomRank* are baked into the pre-resolved slot triples.
+		Interlocked.Increment(ref _rankVersion);
 	}
 
 	/* ==================== Reveal All ==================== */
@@ -220,9 +260,7 @@ public sealed class ScoreboardService(Plugin plugin)
 
 		foreach (var player in _core.PlayerManager.GetAllValidPlayers())
 		{
-			if (!player.IsValid || player.IsFakeClient)
-				continue;
-
+			// Bots never get a record, so loaded data also means "human".
 			var data = plugin.PlayerData.GetPlayerData(player);
 			if (data == null || !data.IsLoaded)
 				continue;
@@ -233,9 +271,9 @@ public sealed class ScoreboardService(Plugin plugin)
 
 	/// <summary>
 	/// Tick handler — replays the cached rank triple for every player, gated by
-	/// the change detector in <see cref="SetCompetitiveRank"/>. In steady state
+	/// the change detector in <see cref="ApplyCompetitiveRank"/>. In steady state
 	/// (cache unchanged, controller fields intact) this does no I/O per player
-	/// per tick beyond three field reads and a tuple compare.
+	/// per tick beyond three field reads and a compare.
 	/// <para>
 	/// The detector fires the <c>*Updated()</c> notifiers when either the
 	/// intended value differs from the last-notified triple (authoritative
@@ -253,25 +291,69 @@ public sealed class ScoreboardService(Plugin plugin)
 	/// the replication trigger, so we now have to fire it — but only when the
 	/// value actually changed.
 	/// </para>
+	/// <para>
+	/// Reads only the pre-resolved <see cref="_slotRanks"/>; a slot re-resolves when
+	/// its player object or <see cref="_rankVersion"/> changes.
+	/// </para>
 	/// </summary>
 	private void ApplyAllCachedScoreboards()
 	{
-		if (!plugin.Config.CurrentValue.Scoreboard.UseRanks)
+		if (!_useRanks)
 			return;
 
-		var cfg = plugin.Config.CurrentValue.Scoreboard;
+		var version = Volatile.Read(ref _rankVersion);
+		var players = _core.PlayerManager;
 
-		foreach (var player in _core.PlayerManager.GetAllValidPlayers())
+		// SteamID can resolve after the last version bump (late auth), so rankless
+		// slots also retry once every 64 ticks.
+		var retryRankless = (++_tickCount & 63) == 0;
+
+		for (var slot = 0; slot < MaxSlots; slot++)
 		{
-			if (!player.IsValid || player.IsFakeClient)
-				continue;
+			ref var entry = ref _slotRanks[slot];
+			var player = players.GetPlayer(slot);
 
-			if (!_cachedRanks.TryGetValue(player.SteamID, out var cached))
+			if (player == null)
+			{
+				if (entry.Player != null)
+					entry = default;
 				continue;
+			}
 
-			SetCompetitiveRank(player, cfg.RankMode, cached.RankId, cached.DisplayPoints, cached.Wins,
-				cfg.CustomRankMax, cfg.CustomRankBase, cfg.CustomRankMargin);
+			if (!ReferenceEquals(entry.Player, player) || entry.Version != version || (retryRankless && !entry.HasRank))
+				ResolveSlotRank(ref entry, player, version);
+
+			if (entry.HasRank)
+				ApplyCompetitiveRank(player, ref entry);
 		}
+	}
+
+	private void ResolveSlotRank(ref SlotRank entry, IPlayer player, int version)
+	{
+		// A new player object is a new connection: its client has seen nothing yet.
+		if (!ReferenceEquals(entry.Player, player))
+			entry = default;
+
+		entry.Player = player;
+		entry.Version = version;
+
+		// Bots never get a cache entry; the slot cache holds their identity, so no native read.
+		if (plugin.PlayerData.Resolve(player) is not { IsBot: false } identity
+			|| !_cachedRanks.TryGetValue(identity.SteamId, out var cached))
+		{
+			entry.HasRank = false;
+			return;
+		}
+
+		entry.HasRank = true;
+		SetSlotTriple(ref entry, cached.RankId, cached.DisplayPoints, cached.Wins, plugin.Config.CurrentValue.Scoreboard);
+	}
+
+	private static void SetSlotTriple(ref SlotRank entry, int rankId, int displayPoints, int wins, ScoreboardSettings cfg)
+	{
+		(entry.RankType, entry.RankValue) = ResolveCompetitiveDisplay(
+			cfg.RankMode, rankId, displayPoints, cfg.CustomRankMax, cfg.CustomRankBase, cfg.CustomRankMargin);
+		entry.Wins = wins;
 	}
 
 	/// <summary>
@@ -303,19 +385,29 @@ public sealed class ScoreboardService(Plugin plugin)
 		int wins = Math.Max(10, data.GameWins);
 
 		_cachedRanks[data.SteamId64] = (rankId, effectivePoints, wins);
+		var version = Interlocked.Increment(ref _rankVersion);
 
-		// The change detector inside SetCompetitiveRank will observe that the
-		// resolved triple diverges from _lastNotified and fire the *Updated()
-		// notifiers exactly once for this authoritative write.
-		SetCompetitiveRank(player, cfg.RankMode, rankId, effectivePoints, wins,
-			cfg.CustomRankMax, cfg.CustomRankBase, cfg.CustomRankMargin);
+		// Apply through the slot so the change detector below fires the *Updated()
+		// notifiers exactly once for this authoritative write, and the tick need not re-resolve.
+		var slot = player.PlayerID;
+		if ((uint)slot >= MaxSlots || !ReferenceEquals(_core.PlayerManager.GetPlayer(slot), player))
+			return;
+
+		ref var entry = ref _slotRanks[slot];
+		if (!ReferenceEquals(entry.Player, player))
+			entry = default;
+
+		entry.Player = player;
+		entry.Version = version;
+		entry.HasRank = true;
+		SetSlotTriple(ref entry, rankId, effectivePoints, wins, cfg);
+		ApplyCompetitiveRank(player, ref entry);
 	}
 
 	/// <summary>
-	/// Resolves the mode-dependent controller display values. Pure helper — no
-	/// I/O — so it can be called from the change detector to compute the
-	/// intended triple before deciding whether to write, without duplicating
-	/// the switch. Wins is not affected by mode and flows through untouched.
+	/// Resolves the mode-dependent controller display values. Pure helper, run when
+	/// a rank is cached or a slot re-resolves, never per tick. Wins is not affected
+	/// by mode and flows through untouched.
 	/// </summary>
 	private static (byte RankType, int RankValue) ResolveCompetitiveDisplay(
 		int mode, int rankId, int currentPoints,
@@ -334,15 +426,15 @@ public sealed class ScoreboardService(Plugin plugin)
 	}
 
 	/// <summary>
-	/// Writes the effective competitive display fields and fires the
+	/// Writes the slot's competitive display fields and fires the
 	/// <c>*Updated()</c> notifiers — but only when the change detector says
-	/// there is a real delta. The detector consults <see cref="_lastNotified"/>
-	/// and the controller's live field values to skip when neither has moved.
+	/// there is a real delta. The detector consults the slot's <c>Notified*</c>
+	/// mirror and the controller's live field values to skip when neither has moved.
 	/// <para>
 	/// All call sites are on the main game thread (OnTick, round_prestart,
 	/// chat commands, <c>PlayerDataService</c>'s <c>NextWorldUpdate</c>
 	/// continuation, and SharedApi consumers per SwiftlyS2 convention), so no
-	/// synchronization is required around <see cref="_lastNotified"/> and no
+	/// synchronization is required around <see cref="_slotRanks"/> and no
 	/// scheduler round-trip is needed for the writes. The notifier IS the
 	/// replication trigger under Valve's tightened scoreboard delta detection
 	/// (the "FPS drop on tab open" optimization): writing the ref fields
@@ -350,29 +442,19 @@ public sealed class ScoreboardService(Plugin plugin)
 	/// for the next snapshot, so notifiers have to fire on every real change.
 	/// </para>
 	/// </summary>
-	private void SetCompetitiveRank(
-		IPlayer player,
-		int mode,
-		int rankId,
-		int currentPoints,
-		int wins,
-		int rankMax,
-		int rankBase,
-		int rankMargin)
+	private static void ApplyCompetitiveRank(IPlayer player, ref SlotRank entry)
 	{
-		if (!player.IsValid)
-			return;
-
+		// Not player.IsValid: that also demands a pawn and resolves the controller three times.
 		var controller = player.Controller;
-		if (controller == null)
+		if (controller is not { IsValid: true })
 			return;
 
-		var (rankType, rankValue) = ResolveCompetitiveDisplay(
-			mode, rankId, currentPoints, rankMax, rankBase, rankMargin);
-		var intended = (rankType, rankValue, wins);
+		var rankType = entry.RankType;
+		var rankValue = entry.RankValue;
+		var wins = entry.Wins;
 
 		// Change detector — write + notify unless ALL of these hold:
-		//   1. we have a prior notify record for this player, AND
+		//   1. we have a prior notify record for this slot's player, AND
 		//   2. our intended triple matches what we last notified, AND
 		//   3. the controller's live fields still match what we last notified
 		//      (they don't in the "all players show ?" recovery path, where
@@ -380,8 +462,10 @@ public sealed class ScoreboardService(Plugin plugin)
 		//      snapshots — detect the drift here and re-notify).
 		// If all three hold, the client already has the right values and re-
 		// firing the *Updated() notifiers 64 Hz just spams the network layer.
-		if (_lastNotified.TryGetValue(player.SteamID, out var lastNotified)
-			&& lastNotified == intended
+		if (entry.HasNotified
+			&& entry.NotifiedRankType == rankType
+			&& entry.NotifiedRankValue == rankValue
+			&& entry.NotifiedWins == wins
 			&& controller.CompetitiveRanking == rankValue
 			&& controller.CompetitiveRankType == rankType
 			&& controller.CompetitiveWins == wins)
@@ -397,7 +481,10 @@ public sealed class ScoreboardService(Plugin plugin)
 		controller.CompetitiveRankingUpdated();
 		controller.CompetitiveWinsUpdated();
 
-		_lastNotified[player.SteamID] = intended;
+		entry.HasNotified = true;
+		entry.NotifiedRankType = rankType;
+		entry.NotifiedRankValue = rankValue;
+		entry.NotifiedWins = wins;
 	}
 }
 

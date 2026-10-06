@@ -12,7 +12,7 @@ namespace K4Ranks.Stats.Events;
 /// Handles all EventWeaponFire processing in a single hook.
 /// Tracks: Shots fired per weapon
 /// </summary>
-public sealed class WeaponFireHandler(ModuleConfig modules, Func<IPlayer, PlayerData?> getPlayerData, Func<bool> canProcess)
+public sealed class WeaponFireHandler(ModuleConfig modules, Func<IPlayer?, Plugin.PlayerDataService.SlotEntry?> resolve, Func<bool> canProcess)
 {
 
 	// =========================================
@@ -24,12 +24,9 @@ public sealed class WeaponFireHandler(ModuleConfig modules, Func<IPlayer, Player
 		if (!canProcess())
 			return HookResult.Continue;
 
-		var player = @event.UserIdPlayer;
-
-		if (player is null || !player.IsValid || player.IsFakeClient)
-			return HookResult.Continue;
-
-		var data = getPlayerData(player);
+		// Hottest event in the plugin. Loaded data implies a connected human, and a shot
+		// implies a live pawn, so no native IsValid / IsFakeClient reads are needed.
+		var data = resolve(@event.UserIdPlayer)?.Data;
 		if (data == null || !data.IsLoaded)
 			return HookResult.Continue;
 

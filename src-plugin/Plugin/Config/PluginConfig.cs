@@ -26,6 +26,12 @@ public sealed class DatabaseSettings
 	/// </summary>
 	public string TablePrefix { get; set; } = "";
 
+	/// <summary>
+	/// Where <see cref="TablePrefix"/> is attached: "before" gives awp_lvl_base and uses
+	/// the value verbatim, "after" gives lvl_base_awp and adds the underscore itself.
+	/// </summary>
+	public string TablePrefixPosition { get; set; } = "before";
+
 	/// <summary>Days to keep inactive player records (0 = forever)</summary>
 	public int PurgeDays { get; set; } = 30;
 }

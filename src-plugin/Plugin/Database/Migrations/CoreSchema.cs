@@ -20,6 +20,13 @@ internal static class CoreSchema
 		EnsureIndex(schema, create, "idx_lastconnect", "lastconnect");
 	}
 
+	/// <summary>Indexes behind the top-N and position queries for both leaderboards.</summary>
+	public static void EnsureRankingIndexes(ISchemaExpressionRoot schema, ICreateExpressionRoot create)
+	{
+		EnsureIndex(schema, create, "idx_value", "value", descending: true);
+		EnsureIndex(schema, create, "idx_playtime", "playtime", descending: true);
+	}
+
 	public static void EnsureSettingsTable(ISchemaExpressionRoot schema, ICreateExpressionRoot create)
 	{
 		if (schema.Table(TableNames.Settings).Exists())
@@ -39,7 +46,7 @@ internal static class CoreSchema
 		string columnName,
 		bool descending = false)
 	{
-		indexName = TableNames.Prefix + indexName;
+		indexName = TableNames.Apply(indexName);
 
 		if (schema.Table(TableNames.Base).Index(indexName).Exists())
 			return;

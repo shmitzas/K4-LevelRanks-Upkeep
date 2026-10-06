@@ -98,10 +98,7 @@ public sealed class HostageEventsHandler(ISwiftlyCore core, PointsConfig points,
 
 	private bool IsValidLoaded([NotNullWhen(true)] IPlayer? player)
 	{
-		if (player == null || !player.IsValid || player.IsFakeClient)
-			return false;
-
-		var data = getPlayerData(player);
-		return data?.IsLoaded == true;
+		// Bots never get a record, so loaded data also means "human".
+		return player is not null && getPlayerData(player)?.IsLoaded == true && player.IsValid;
 	}
 }

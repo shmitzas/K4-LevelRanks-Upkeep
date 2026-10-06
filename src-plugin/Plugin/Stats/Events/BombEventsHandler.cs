@@ -54,10 +54,7 @@ public sealed class BombEventsHandler(ISwiftlyCore core, PointsConfig points, Fu
 
 		foreach (var player in core.PlayerManager.GetAllValidPlayers())
 		{
-			if (!IsValidLoaded(player))
-				continue;
-
-			if (defuser is { IsValid: true } && player.SteamID == defuser.SteamID)
+			if (ReferenceEquals(player, defuser) || !IsValidLoaded(player))
 				continue;
 
 			// Team 3 = CounterTerrorist
@@ -128,10 +125,7 @@ public sealed class BombEventsHandler(ISwiftlyCore core, PointsConfig points, Fu
 
 	private bool IsValidLoaded([NotNullWhen(true)] IPlayer? player)
 	{
-		if (player == null || !player.IsValid || player.IsFakeClient)
-			return false;
-
-		var data = getPlayerData(player);
-		return data?.IsLoaded == true;
+		// Bots never get a record, so loaded data also means "human".
+		return player is not null && getPlayerData(player)?.IsLoaded == true && player.IsValid;
 	}
 }

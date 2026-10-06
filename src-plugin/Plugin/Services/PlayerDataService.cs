@@ -6,144 +6,210 @@ namespace K4Ranks;
 
 public sealed partial class Plugin
 {
-	public sealed class PlayerDataService(Plugin plugin)
+	public sealed partial class PlayerDataService(Plugin plugin)
 	{
 		/* ==================== Fields ==================== */
 
 		private readonly Plugin _plugin = plugin;
 		private readonly ConcurrentDictionary<ulong, PlayerData> _playerData = new();
 
-		/// <summary>
-		/// Tracks SteamIDs whose load is currently in flight, to prevent
-		/// duplicate concurrent loads (e.g. EventPlayerActivate firing twice
-		/// for the same player) from racing each other and silently
-		/// overwriting in-memory mutations.
-		/// </summary>
+		/// <summary>SteamIDs with a load in flight, so a repeated player_activate can't start a second one.</summary>
 		private readonly ConcurrentDictionary<ulong, byte> _loadInFlight = new();
+
+		/* ==================== Slot Cache ==================== */
+
+		private const int MaxSlots = 64;
+
+		/// <summary>
+		/// Identity of the player object currently in a slot, resolved once so per-event
+		/// lookups don't re-read the native SteamID / IsFakeClient.
+		/// </summary>
+		public sealed class SlotEntry(IPlayer player, bool isBot, ulong steamId, ConcurrentDictionary<ulong, PlayerData> records)
+		{
+			public readonly IPlayer Player = player;
+			public readonly bool IsBot = isBot;
+			public readonly ulong SteamId = steamId;
+
+			/// <summary>Looked up live, so a record removed on disconnect is never served.</summary>
+			public PlayerData? Data => !IsBot && SteamId != 0 && records.TryGetValue(SteamId, out var data) ? data : null;
+		}
+
+		private readonly SlotEntry?[] _slots = new SlotEntry?[MaxSlots];
+
+		/// <summary>
+		/// Cached identity for <paramref name="player"/>, or null once it is no longer the
+		/// slot's current (connected) player object.
+		/// </summary>
+		internal SlotEntry? Resolve(IPlayer? player)
+		{
+			if (player is null)
+				return null;
+
+			var slot = player.PlayerID;
+			if ((uint)slot >= MaxSlots || !ReferenceEquals(Core.PlayerManager.GetPlayer(slot), player))
+				return null;
+
+			var entry = Volatile.Read(ref _slots[slot]);
+			if (entry is not null && ReferenceEquals(entry.Player, player))
+				return entry;
+
+			entry = new SlotEntry(player, player.IsFakeClient, player.SteamID, _playerData);
+
+			// A human reads SteamID 0 until Steam auth lands; don't pin that.
+			if (entry.IsBot || entry.SteamId != 0)
+				Volatile.Write(ref _slots[slot], entry);
+
+			return entry;
+		}
+
+		/// <summary>Humans passing <see cref="IPlayer.IsValid"/>; bots excluded.</summary>
+		internal int CountValidHumans()
+		{
+			var players = Core.PlayerManager;
+			var count = 0;
+
+			for (var slot = 0; slot < MaxSlots; slot++)
+			{
+				var player = players.GetPlayer(slot);
+				if (player is not null && Resolve(player) is { IsBot: false } && player.IsValid)
+					count++;
+			}
+
+			return count;
+		}
 
 		/* ==================== Public Accessors ==================== */
 
-		public PlayerData? GetPlayerData(IPlayer player)
-		{
-			return _playerData.TryGetValue(player.SteamID, out var data) ? data : null;
-		}
+		public PlayerData? GetPlayerData(IPlayer player) => Resolve(player)?.Data;
 
-		public IEnumerable<PlayerData> GetAllLoadedPlayers()
-		{
-			return _playerData.Values.Where(p => p.IsLoaded);
-		}
-
-		public bool IsPlayerLoaded(ulong steamId)
-		{
-			return _playerData.TryGetValue(steamId, out var data) && data.IsLoaded;
-		}
-
-		public void RemovePlayer(ulong steamId)
-		{
-			_playerData.TryRemove(steamId, out _);
-			_loadInFlight.TryRemove(steamId, out _);
-		}
+		/// <summary>Records of connected players; every tracked record is fully loaded.</summary>
+		public ICollection<PlayerData> GetAllLoadedPlayers() => _playerData.Values;
 
 		/* ==================== Load ==================== */
 
-		public async Task LoadPlayerDataAsync(IPlayer? player)
+		/// <summary>
+		/// Starts tracking a connected human unless already tracked or loading. Game thread only:
+		/// every native read happens here, so the async load never touches the player object.
+		/// </summary>
+		public void EnsureLoaded(IPlayer player)
 		{
-            if (player == null || !player.IsValid)
-                return;
+			if (Resolve(player) is not { IsBot: false, SteamId: not 0 and var steamId })
+				return;
 
-            var steamId64 = player.SteamID;
-			var steamId = steamId64.ToString();
+			if (_playerData.ContainsKey(steamId))
+				return;
 
-			// De-dupe concurrent loads: EventPlayerActivate may fire more than once
-			// per session. Without this guard, a second load can overwrite the
-			// in-memory record with the DB row, silently discarding unsaved points.
-			if (!_loadInFlight.TryAdd(steamId64, 0))
+			// Back before the last session was saved: that record is newer than the database.
+			if (_departed.TryRemove(steamId, out var departed))
 			{
+				Track(player, steamId, departed);
 				return;
 			}
 
-			// If already loaded successfully, skip — never re-load over a live record.
-			if (_playerData.TryGetValue(steamId64, out var existing) && existing.IsLoaded)
-			{
-				_loadInFlight.TryRemove(steamId64, out _);
+			// Still connecting; the periodic retry comes back once the controller exists.
+			if (player.Controller is not { IsValid: true } controller)
 				return;
-			}
 
-			try
+			if (!_loadInFlight.TryAdd(steamId, 0))
+				return;
+
+			var name = SanitizeName(controller.PlayerName) ?? "";
+			_ = Task.Run(() => LoadAsync(steamId, name));
+		}
+
+		/// <summary>Retries anyone connected but untracked: a failed load, or Steam auth that landed late.</summary>
+		internal void LoadMissingPlayers()
+		{
+			var players = Core.PlayerManager;
+
+			for (var slot = 0; slot < MaxSlots; slot++)
 			{
-				// CRITICAL: LoadOrCreatePlayerData throws on transient DB errors so we
-				// do NOT silently insert a default "start points" record — that bug
-				// caused real players to be reset to StartPoints on a save after a
-				// transient load failure.
-				var data = await LoadOrCreatePlayerData(player, steamId64);
-
-				if (data == null)
-				{
-					Core.Logger.LogWarning("Failed to load or create player data for {Steam}. Player disconnected before data could be loaded", steamId);
-                    return;
-				}
-
-				await LoadPlayerSettings(data, steamId);
-				var weaponStatsCount = await LoadWeaponStats(data, steamId);
-				await LoadHitData(data, steamId);
-
-				_playerData[steamId64] = data;
-
-				Core.Scheduler.NextWorldUpdate(() =>
-				{
-					if (player.IsValid)
-						_plugin.Scoreboard.UpdatePlayerScoreboard(player);
-				});
-
-				if (_plugin.Config.CurrentValue.Scoreboard.Clantags)
-				{
-					Core.Scheduler.NextWorldUpdate(() =>
-					{
-						if (player.IsValid)
-							UpdatePlayerClanTag(player, data);
-					});
-				}
-			}
-			catch (Exception ex)
-			{
-				// On any failure, do NOT cache a partial/default record. The player
-				// will simply not earn points until they reconnect (and trigger another
-				// load attempt) — far safer than overwriting their real DB row.
-				Core.Logger.LogError(ex, "Failed to load player data for {Steam}; player will not be tracked this session", steamId);
-			}
-			finally
-			{
-				_loadInFlight.TryRemove(steamId64, out _);
+				if (players.GetPlayer(slot) is { } player)
+					EnsureLoaded(player);
 			}
 		}
 
-		private async Task<PlayerData?> LoadOrCreatePlayerData(IPlayer? player, ulong steamId64)
+		private async Task LoadAsync(ulong steamId, string name)
 		{
-            if (player == null || !player.IsValid)
-                return null;
+			PlayerRecord? record = null;
 
-            var steamId = steamId64.ToString();
-            var data = await _plugin.Database.LoadPlayerAsync(steamId);
-
-			if (data == null)
+			try
 			{
-				var startPoints = _plugin.Config.CurrentValue.Rank.StartPoints;
-				return new PlayerData
-				{
-					Steam = steamId,
-					Name = SanitizeName(player?.Controller?.PlayerName) ?? "",
-					Value = startPoints,
-					Rank = _plugin.Ranks.GetRankId(startPoints),
-					IsLoaded = true,
-					IsDirty = true
-				};
+				record = await _plugin.Database.LoadPlayerAsync(steamId.ToString());
+			}
+			catch (Exception)
+			{
+				// Already logged. No placeholder record: its next save would overwrite the real rows.
 			}
 
-			data.Name = SanitizeName(player?.Controller?.PlayerName) ?? data.Name;
+			Core.Scheduler.NextWorldUpdate(() => CompleteLoad(steamId, name, record));
+		}
+
+		private void CompleteLoad(ulong steamId, string name, PlayerRecord? record)
+		{
+			_loadInFlight.TryRemove(steamId, out _);
+
+			if (record is null || _playerData.ContainsKey(steamId))
+				return;
+
+			// By SteamID, not the original player object, so a reconnect during the load still lands.
+			var player = FindConnected(steamId);
+			if (player is null)
+				return;
+
+			if (_departed.TryRemove(steamId, out var departed))
+			{
+				Track(player, steamId, departed);
+				return;
+			}
+
+			Track(player, steamId, BuildRecord(steamId, name, record));
+		}
+
+		private void Track(IPlayer player, ulong steamId, PlayerData data)
+		{
+			// Time spent away is not playtime.
+			data.SessionStartTime = DateTime.UtcNow;
+			_playerData[steamId] = data;
+
+			_plugin.Scoreboard.UpdatePlayerScoreboard(player);
+
+			if (_plugin.Config.CurrentValue.Scoreboard.Clantags)
+				UpdatePlayerClanTag(player, data);
+		}
+
+		private PlayerData BuildRecord(ulong steamId, string name, PlayerRecord record)
+		{
+			var steam = steamId.ToString();
+			var data = record.Base ?? new PlayerData { Value = _plugin.Config.CurrentValue.Rank.StartPoints };
+
+			data.Steam = steam;
+			if (name.Length > 0)
+				data.Name = name;
+
 			data.Rank = _plugin.Ranks.GetRankId(data.Points);
+			data.Settings = record.Settings ?? new PlayerSettings { Steam = steam };
+			data.HitData = record.Hits ?? new HitData { Steam = steam };
+			data.WeaponStats.LoadFrom(record.Weapons);
 			data.IsLoaded = true;
 
+			// What the database holds is the baseline later saves diff against; a new player's row is written on the next save.
+			data.MarkSynced(baseRowMissing: record.Base is null);
 			return data;
+		}
+
+		private IPlayer? FindConnected(ulong steamId)
+		{
+			var players = Core.PlayerManager;
+
+			for (var slot = 0; slot < MaxSlots; slot++)
+			{
+				var player = players.GetPlayer(slot);
+				if (player is not null && Resolve(player) is { IsBot: false } entry && entry.SteamId == steamId)
+					return player;
+			}
+
+			return null;
 		}
 
 		/// <summary>
@@ -171,135 +237,39 @@ public sealed partial class Plugin
 			return result.Length > MaxNameLength ? result[..MaxNameLength] : result;
 		}
 
-		private async Task LoadPlayerSettings(PlayerData data, string steamId)
-		{
-			var settings = await _plugin.Database.LoadPlayerSettingsAsync(steamId);
-			data.Settings = settings ?? new PlayerSettings { Steam = steamId };
-		}
-
-		private async Task<int> LoadWeaponStats(PlayerData data, string steamId)
-		{
-			if (!_plugin.Modules.CurrentValue.WeaponStatsEnabled)
-				return 0;
-
-			var weaponStats = await _plugin.Database.LoadWeaponStatsAsync(steamId);
-			data.WeaponStats.LoadFrom(weaponStats);
-
-			return weaponStats.Count;
-		}
-
-		private async Task LoadHitData(PlayerData data, string steamId)
-		{
-			if (!_plugin.Modules.CurrentValue.HitStatsEnabled)
-				return;
-
-			var hitData = await _plugin.Database.LoadHitDataAsync(steamId);
-			data.HitData = hitData ?? new HitData { Steam = steamId };
-		}
-
-		/* ==================== Save ==================== */
-
-		public async Task SavePlayerDataAsync(ulong steamId)
-		{
-			if (!_playerData.TryGetValue(steamId, out var data) || !data.IsLoaded)
-				return;
-
-			data.UpdatePlaytime();
-
-			if (data.IsDirty)
-				await _plugin.Database.SavePlayerAsync(data);
-
-			if (data.Settings.IsDirty)
-				await _plugin.Database.SavePlayerSettingsAsync(data.Steam, data.Settings);
-
-			if (_plugin.Modules.CurrentValue.WeaponStatsEnabled && data.WeaponStatsDirty)
-				await _plugin.Database.SaveWeaponStatsAsync(data.Steam, data.WeaponStats.GetAll());
-
-			if (_plugin.Modules.CurrentValue.HitStatsEnabled && data.HitDataDirty)
-				await _plugin.Database.SaveHitDataAsync(data.HitData);
-		}
-
-		public async Task SaveAllPlayersAsync()
-		{
-			var loadedPlayers = _playerData.Values.Where(p => p.IsLoaded).ToList();
-			if (loadedPlayers.Count == 0)
-				return;
-
-			foreach (var data in loadedPlayers)
-				data.UpdatePlaytime();
-
-			await SaveAllPlayerData(loadedPlayers);
-			await SaveAllSettings(loadedPlayers);
-			await SaveAllWeaponStats(loadedPlayers);
-			await SaveAllHitData(loadedPlayers);
-		}
-
-		private async Task SaveAllPlayerData(List<PlayerData> loadedPlayers)
-		{
-			var dirtyPlayers = loadedPlayers.Where(p => p.IsDirty).ToList();
-			if (dirtyPlayers.Count > 0)
-				await _plugin.Database.SavePlayersAsync(dirtyPlayers);
-		}
-
-		private async Task SaveAllSettings(List<PlayerData> loadedPlayers)
-		{
-			var dirtySettings = loadedPlayers
-				.Where(p => p.Settings.IsDirty)
-				.Select(p => (p.Steam, p.Settings))
-				.ToList();
-
-			if (dirtySettings.Count > 0)
-				await _plugin.Database.SaveAllPlayerSettingsAsync(dirtySettings);
-		}
-
-		private async Task SaveAllWeaponStats(List<PlayerData> loadedPlayers)
-		{
-			if (!_plugin.Modules.CurrentValue.WeaponStatsEnabled)
-				return;
-
-			foreach (var data in loadedPlayers.Where(p => p.WeaponStatsDirty))
-				await _plugin.Database.SaveWeaponStatsAsync(data.Steam, data.WeaponStats.GetAll());
-		}
-
-		private async Task SaveAllHitData(List<PlayerData> loadedPlayers)
-		{
-			if (!_plugin.Modules.CurrentValue.HitStatsEnabled)
-				return;
-
-			foreach (var data in loadedPlayers.Where(p => p.HitDataDirty))
-				await _plugin.Database.SaveHitDataAsync(data.HitData);
-		}
-
 		/* ==================== Points ==================== */
 
 		public void ModifyPoints(IPlayer player, int amount, string reason, bool showMessage = true, string? otherPlayerName = null)
 		{
-			if (!_playerData.TryGetValue(player.SteamID, out var data) || !data.IsLoaded)
+			var entry = Resolve(player);
+			var data = entry?.Data;
+			if (data is not { IsLoaded: true })
 				return;
 
 			if (amount == 0)
 				return;
 
-			amount = ApplyVipMultiplier(player, amount);
+			var cfg = _plugin.Config.CurrentValue;
+			amount = ApplyVipMultiplier(entry!.SteamId, amount, cfg.Vip);
 
 			var oldRank = _plugin.Ranks.GetRank(data.Points);
 			data.Points += amount;
 			data.RoundPoints += amount;
-			data.IsDirty = true;
 			var newRank = _plugin.Ranks.GetRank(data.Points);
 
-			if (_plugin.Config.CurrentValue.Scoreboard.Clantags && oldRank.Name != newRank.Name)
+			if (cfg.Scoreboard.Clantags && oldRank.Name != newRank.Name)
 				UpdatePlayerClanTag(player, data);
 
-			if (_plugin.Config.CurrentValue.Scoreboard.ScoreSync)
+			if (cfg.Scoreboard.ScoreSync)
 			{
-				player.Controller?.Score = data.Points;
-				player.Controller?.ScoreUpdated();
+				var controller = player.Controller;
+				controller?.Score = data.Points;
+				controller?.ScoreUpdated();
 			}
 
-			if (showMessage && !_plugin.Config.CurrentValue.Points.RoundEndSummary && data.PointMessagesEnabled)
+			if (showMessage && !cfg.Points.RoundEndSummary && data.PointMessagesEnabled)
 			{
-				var displayName = _plugin.Config.CurrentValue.Points.ShowPlayerNames ? otherPlayerName : null;
+				var displayName = cfg.Points.ShowPlayerNames ? otherPlayerName : null;
 				ShowPointMessage(player, amount, reason, displayName);
 			}
 
@@ -310,25 +280,29 @@ public sealed partial class Plugin
 			}
 		}
 
-		private int ApplyVipMultiplier(IPlayer player, int amount)
+		private static int ApplyVipMultiplier(ulong steamId, int amount, VipSettings vip)
 		{
 			if (amount <= 0)
 				return amount;
 
-			if (_plugin.Config.CurrentValue.Vip.Multiplier <= 1.0 || _plugin.Config.CurrentValue.Vip.Flags.Count == 0)
+			if (vip.Multiplier <= 1.0 || vip.Flags.Count == 0)
 				return amount;
 
-			if (!IsVipPlayer(player.SteamID))
+			if (!IsVipPlayer(steamId, vip.Flags))
 				return amount;
 
-			return (int)(amount * _plugin.Config.CurrentValue.Vip.Multiplier);
+			return (int)(amount * vip.Multiplier);
 		}
 
-		private bool IsVipPlayer(ulong steamId)
+		private static bool IsVipPlayer(ulong steamId, List<string> flags)
 		{
-			return _plugin.Config.CurrentValue.Vip.Flags.Any(flag =>
-				Core.Permission.PlayerHasPermission(steamId, flag)
-			);
+			foreach (var flag in flags)
+			{
+				if (Core.Permission.PlayerHasPermission(steamId, flag))
+					return true;
+			}
+
+			return false;
 		}
 
 		/* ==================== Messages ==================== */
@@ -357,7 +331,8 @@ public sealed partial class Plugin
 
 		public void ShowRoundSummary(IPlayer player)
 		{
-			if (!_playerData.TryGetValue(player.SteamID, out var data) || !data.IsLoaded)
+			var data = GetPlayerData(player);
+			if (data is not { IsLoaded: true })
 				return;
 
 			if (data.RoundPoints == 0 || !data.PointMessagesEnabled)

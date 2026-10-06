@@ -70,14 +70,6 @@ public sealed class HitData
 	public int Neak { get; set; }
 
 	// =========================================
-	// =           STATE TRACKING
-	// =========================================
-
-	/// <summary>Whether data has been modified and needs saving</summary>
-	[Ignore]
-	public bool IsDirty { get; set; }
-
-	// =========================================
 	// =           COMPUTED PROPERTIES
 	// =========================================
 
@@ -127,11 +119,9 @@ public sealed class HitData
 				Chest++;
 				break;
 		}
-
-		IsDirty = true;
 	}
 
-	/// <summary>Reset all hit data</summary>
+	/// <summary>Reset all hit data. The saved snapshot goes with it: a reset deletes the stored row.</summary>
 	public void Reset()
 	{
 		DmgHealth = 0;
@@ -144,6 +134,63 @@ public sealed class HitData
 		LeftLeg = 0;
 		RightLeg = 0;
 		Neak = 0;
-		IsDirty = true;
+		_synced = default;
+		_sent = null;
 	}
+
+	// =========================================
+	// =           SAVE STATE
+	// =========================================
+
+	// Guarded by the owning PlayerData's sync lock.
+	private HitCounters _synced;
+	private HitCounters? _sent;
+
+	internal void MarkSynced() => _synced = ReadCounters();
+
+	internal bool HasPendingChanges() => ReadCounters() != _synced;
+
+	/// <summary>The row when changed since the last committed save; otherwise null.</summary>
+	internal HitData? BuildChange(string steam)
+	{
+		var current = ReadCounters();
+		_sent = current == _synced ? null : current;
+
+		return _sent is null ? null : new HitData
+		{
+			Steam = steam,
+			DmgHealth = current.DmgHealth,
+			DmgArmor = current.DmgArmor,
+			Head = current.Head,
+			Chest = current.Chest,
+			Belly = current.Belly,
+			LeftArm = current.LeftArm,
+			RightArm = current.RightArm,
+			LeftLeg = current.LeftLeg,
+			RightLeg = current.RightLeg,
+			Neak = current.Neak
+		};
+	}
+
+	internal void AcknowledgeSync()
+	{
+		if (_sent is { } sent)
+			_synced = sent;
+
+		_sent = null;
+	}
+
+	private HitCounters ReadCounters() => new()
+	{
+		DmgHealth = DmgHealth,
+		DmgArmor = DmgArmor,
+		Head = Head,
+		Chest = Chest,
+		Belly = Belly,
+		LeftArm = LeftArm,
+		RightArm = RightArm,
+		LeftLeg = LeftLeg,
+		RightLeg = RightLeg,
+		Neak = Neak
+	};
 }

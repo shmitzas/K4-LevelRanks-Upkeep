@@ -1,10 +1,7 @@
 using System.Data;
 using FluentMigrator.Runner;
 using FluentMigrator.Runner.VersionTableInfo;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
-using MySqlConnector;
-using Npgsql;
 
 namespace K4Ranks.Database.Migrations;
 
@@ -17,15 +14,19 @@ public static class MigrationRunner
 	/// <summary>
 	/// Run all pending migrations
 	/// </summary>
-	/// <param name="dbConnection">Database connection</param>
-	public static void RunMigrations(IDbConnection dbConnection)
+	/// <param name="dbConnection">Unopened database connection; only its connection string is read.</param>
+	/// <param name="driver">SwiftlyS2's driver id: <c>mysql</c>, <c>postgresql</c> or <c>sqlite</c>.</param>
+	public static void RunMigrations(IDbConnection dbConnection, string? driver)
 	{
-		var serviceProvider = new ServiceCollection()
+		// Not disposing leaks the processor and the connection it opened, which on SQLite
+		// keeps the database file held open across a plugin reload.
+		using var serviceProvider = new ServiceCollection()
 			.AddFluentMigratorCore()
 			.ConfigureRunner(rb =>
 			{
-				ConfigureDatabase(rb, dbConnection);
+				ConfigureDatabase(rb, driver);
 				rb.ScanIn(typeof(MigrationRunner).Assembly).For.Migrations();
+				rb.WithGlobalConnectionString(dbConnection.ConnectionString);
 			})
 			.AddLogging(lb => lb.AddFluentMigratorConsole())
 			.BuildServiceProvider(false);
@@ -36,23 +37,30 @@ public static class MigrationRunner
 	}
 
 	/// <summary>
-	/// Configure the FluentMigrator runner for the appropriate database type
+	/// Configure the FluentMigrator runner for the appropriate database type.
 	/// </summary>
-	private static void ConfigureDatabase(IMigrationRunnerBuilder rb, IDbConnection dbConnection)
+	/// <remarks>
+	/// Keyed on SwiftlyS2's own driver id rather than the connection's CLR type: SwiftlyS2
+	/// builds SQLite connections with System.Data.SQLite, so a type match against the
+	/// Microsoft.Data.Sqlite type this plugin references never fires and every SQLite
+	/// install fell through to the "unsupported" branch.
+	/// </remarks>
+	private static void ConfigureDatabase(IMigrationRunnerBuilder rb, string? driver)
 	{
-		switch (dbConnection)
+		switch (driver?.Trim().ToLowerInvariant())
 		{
-			case MySqlConnection:
+			case "mysql" or "mariadb":
 				rb.AddMySql5();
 				break;
-			case NpgsqlConnection:
+			case "postgresql" or "postgres":
 				rb.AddPostgres();
 				break;
-			case SqliteConnection:
+			case "sqlite":
 				rb.AddSQLite();
 				break;
 			default:
-				throw new NotSupportedException($"Unsupported database connection type: {dbConnection.GetType().Name}");
+				throw new NotSupportedException(
+					$"Unsupported database driver '{driver}'. Supported drivers are mysql, postgresql and sqlite.");
 		}
 
 		// Without its own ledger a prefixed install shares VersionInfo with every other
@@ -61,8 +69,6 @@ public static class MigrationRunner
 		// FluentMigrator's own default verbatim.
 		if (TableNames.HasPrefix)
 			rb.WithVersionTable(new PrefixedVersionTableMetaData());
-
-		rb.WithGlobalConnectionString(dbConnection.ConnectionString);
 	}
 
 	/// <summary>

@@ -1,4 +1,3 @@
-using System.Diagnostics.CodeAnalysis;
 using SwiftlyS2.Shared.GameEventDefinitions;
 using SwiftlyS2.Shared.Misc;
 using SwiftlyS2.Shared.Players;
@@ -14,7 +13,7 @@ namespace K4Ranks.Stats.Events;
 /// Handles all EventPlayerDeath processing in a single hook.
 /// Includes: Kill, Death, Headshot, Assist, TeamKill, Suicide, Killstreak, Special Kills
 /// </summary>
-public sealed class PlayerDeathHandler(PluginConfig config, PointsConfig points, ModuleConfig modules, Func<IPlayer, PlayerData?> getPlayerData, Action<IPlayer, int, string, bool, string?> modifyPoints, Func<bool> canProcess)
+public sealed class PlayerDeathHandler(PluginConfig config, PointsConfig points, ModuleConfig modules, Func<PluginConfig> liveConfig, Func<IPlayer?, Plugin.PlayerDataService.SlotEntry?> resolve, Action<IPlayer, int, string, bool, string?> modifyPoints, Func<bool> canProcess)
 {
 	// =========================================
 	// =           MAIN HANDLER
@@ -29,43 +28,56 @@ public sealed class PlayerDeathHandler(PluginConfig config, PointsConfig points,
 		var victim = @event.UserIdPlayer;
 		var assister = @event.Accessor.GetPlayer("assister");
 
-		var attackerData = IsValidPlayer(attacker) ? getPlayerData(attacker) : null;
-		var victimData = IsValidPlayer(victim) ? getPlayerData(victim) : null;
-		var assisterData = IsValidPlayer(assister) ? getPlayerData(assister) : null;
+		// IsValid re-resolves the controller and pawn each call; read it once per participant.
+		var attackerValid = attacker?.IsValid == true;
+		var victimValid = victim?.IsValid == true;
+		var assisterValid = assister?.IsValid == true;
+
+		// Bots never get PlayerData, so a loaded record also means "human".
+		var victimEntry = victimValid ? resolve(victim) : null;
+		var attackerData = attackerValid ? resolve(attacker)?.Data : null;
+		var victimData = victimEntry?.Data;
+		var assisterData = assisterValid ? resolve(assister)?.Data : null;
+
+		var attackerController = attackerValid ? attacker!.Controller : null;
+		var victimController = victimValid ? victim!.Controller : null;
 
 		var weapon = @event.Weapon ?? "";
 		var headshot = @event.Headshot;
 
+		// ModifyPoints shows names only under these live settings, so build them only then.
+		var livePoints = liveConfig().Points;
+		var wantNames = livePoints.ShowPlayerNames && !livePoints.RoundEndSummary;
+
 		// Determine kill type
-		var isSuicide = attacker is null || !attacker.IsValid || attacker.SteamID == victim?.SteamID;
-		var isTeamKill = !isSuicide && !config.Rank.FFAMode &&
-			attacker?.IsValid == true && victim?.IsValid == true &&
-			attacker.Controller?.Team == victim.Controller?.Team;
-		var isBotKill = victim?.IsFakeClient ?? false;
+		var isSuicide = !attackerValid || ReferenceEquals(attacker, victim);
+		var isTeamKill = !isSuicide && !config.Rank.FFAMode && victimValid &&
+			attackerController?.Team == victimController?.Team;
+		var isBotKill = victimEntry?.IsBot ?? victim?.IsFakeClient ?? false;
 		var isValidKill = !isSuicide && !isTeamKill && (!isBotKill || config.Rank.PointsForBots);
 
 		// =========================================
 		// =           VICTIM PROCESSING
 		// =========================================
 
-		if (victimData?.IsLoaded == true && victim != null)
+		if (victimData?.IsLoaded == true)
 		{
 			if (isSuicide)
 			{
 				// Suicide
-				ProcessPoints(victim, points.Suicide, "k4.reason.suicide");
+				ProcessPoints(victim!, points.Suicide, "k4.reason.suicide");
 			}
-			else if (!isTeamKill && attacker?.IsValid == true)
+			else if (!isTeamKill)
 			{
 				// Normal death
 				var multiplier = CalculateDynamicMultiplier(victimData.Points, attackerData?.Points ?? 0);
 				var deathPoints = (int)Math.Round(points.Death * multiplier);
-				var attackerName = attacker.Controller?.PlayerName;
+				var attackerName = wantNames ? attackerController?.PlayerName : null;
 
-				ProcessPoints(victim, deathPoints, "k4.reason.death", attackerName);
+				ProcessPoints(victim!, deathPoints, "k4.reason.death", attackerName);
 				victimData.Deaths++;
 
-				if (modules.WeaponStatsEnabled && !string.IsNullOrEmpty(weapon))
+				if (modules.WeaponStatsEnabled && weapon.Length > 0)
 					victimData.RecordWeaponDeath(weapon);
 			}
 		}
@@ -74,14 +86,14 @@ public sealed class PlayerDeathHandler(PluginConfig config, PointsConfig points,
 		// =           ATTACKER PROCESSING
 		// =========================================
 
-		if (attackerData?.IsLoaded == true && attacker?.IsValid == true && !isSuicide)
+		if (attackerData?.IsLoaded == true && !isSuicide)
 		{
-			var victimName = victim?.Controller?.PlayerName;
+			var victimName = wantNames ? victim?.Controller?.PlayerName : null;
 
 			if (isTeamKill)
 			{
 				// Team kill penalty
-				ProcessPoints(attacker, points.TeamKill, "k4.reason.teamkill", victimName);
+				ProcessPoints(attacker!, points.TeamKill, "k4.reason.teamkill", victimName);
 			}
 			else if (isValidKill)
 			{
@@ -89,24 +101,24 @@ public sealed class PlayerDeathHandler(PluginConfig config, PointsConfig points,
 				var multiplier = CalculateDynamicMultiplier(attackerData.Points, victimData?.Points ?? 0);
 				var killPoints = (int)Math.Round(points.Kill * multiplier);
 
-				ProcessPoints(attacker, killPoints, "k4.reason.kill", victimName);
+				ProcessPoints(attacker!, killPoints, "k4.reason.kill", victimName);
 				attackerData.Kills++;
 
-				if (modules.WeaponStatsEnabled && !string.IsNullOrEmpty(weapon))
+				if (modules.WeaponStatsEnabled && weapon.Length > 0)
 					attackerData.RecordWeaponKill(weapon, headshot);
 
 				// Headshot bonus
 				if (headshot)
 				{
-					ProcessPoints(attacker, points.Headshot, "k4.reason.headshot", victimName);
+					ProcessPoints(attacker!, points.Headshot, "k4.reason.headshot", victimName);
 					attackerData.Headshots++;
 				}
 
 				// Special kill bonuses
-				ProcessSpecialKills(@event, attacker, victimName);
+				ProcessSpecialKills(@event, weapon, attacker!, victimName);
 
 				// Killstreak
-				ProcessKillstreak(attacker, attackerData);
+				ProcessKillstreak(attacker!, attackerData);
 			}
 		}
 
@@ -114,27 +126,27 @@ public sealed class PlayerDeathHandler(PluginConfig config, PointsConfig points,
 		// =           ASSISTER PROCESSING
 		// =========================================
 
-		if (assisterData?.IsLoaded == true && assister?.IsValid == true)
+		if (assisterData?.IsLoaded == true)
 		{
-			var isTeamAssist = !config.Rank.FFAMode && victim?.IsValid == true &&
-				assister.Controller?.Team == victim.Controller?.Team;
+			var isTeamAssist = !config.Rank.FFAMode && victimValid &&
+				assister!.Controller?.Team == victimController?.Team;
 
 			if (@event.AssistedFlash)
 			{
 				// Flash assist
 				if (isTeamAssist)
-					ProcessPoints(assister, points.TeamAssistFlash, "k4.reason.team_assist_flash");
+					ProcessPoints(assister!, points.TeamAssistFlash, "k4.reason.team_assist_flash");
 				else
-					ProcessPoints(assister, points.AssistFlash, "k4.reason.assist_flash");
+					ProcessPoints(assister!, points.AssistFlash, "k4.reason.assist_flash");
 			}
 			else
 			{
 				// Normal assist
 				if (isTeamAssist)
-					ProcessPoints(assister, points.TeamAssist, "k4.reason.team_assist");
+					ProcessPoints(assister!, points.TeamAssist, "k4.reason.team_assist");
 				else
 				{
-					ProcessPoints(assister, points.Assist, "k4.reason.assist");
+					ProcessPoints(assister!, points.Assist, "k4.reason.assist");
 					assisterData.Assists++;
 				}
 			}
@@ -147,7 +159,7 @@ public sealed class PlayerDeathHandler(PluginConfig config, PointsConfig points,
 	// =           SPECIAL KILLS
 	// =========================================
 
-	private void ProcessSpecialKills(EventPlayerDeath @event, IPlayer attacker, string? victimName)
+	private void ProcessSpecialKills(EventPlayerDeath @event, string weapon, IPlayer attacker, string? victimName)
 	{
 		// Early return if no special kill bonuses are configured
 		if (points.NoScope == 0 && points.Thrusmoke == 0 && points.BlindKill == 0 &&
@@ -155,32 +167,33 @@ public sealed class PlayerDeathHandler(PluginConfig config, PointsConfig points,
 			points.TaserKill == 0 && points.GrenadeKill == 0 && points.InfernoKill == 0 && points.ImpactKill == 0)
 			return;
 
+		// Config first: every event field read is a native call.
+
 		// No-scope
-		if (@event.NoScope && points.NoScope != 0)
+		if (points.NoScope != 0 && @event.NoScope)
 			ProcessPoints(attacker, points.NoScope, "k4.reason.noscope", victimName);
 
 		// Through smoke
-		if (@event.ThruSmoke && points.Thrusmoke != 0)
+		if (points.Thrusmoke != 0 && @event.ThruSmoke)
 			ProcessPoints(attacker, points.Thrusmoke, "k4.reason.thrusmoke", victimName);
 
 		// Blind kill
-		if (@event.AttackerBlind && points.BlindKill != 0)
+		if (points.BlindKill != 0 && @event.AttackerBlind)
 			ProcessPoints(attacker, points.BlindKill, "k4.reason.blind", victimName);
 
 		// Wallbang
-		if (@event.Penetrated > 0 && points.Penetrated != 0)
+		if (points.Penetrated != 0 && @event.Penetrated > 0)
 			ProcessPoints(attacker, points.Penetrated, "k4.reason.penetrated", victimName);
 
 		// Long distance
-		if (@event.Distance >= points.LongDistance && points.LongDistanceKill != 0)
+		if (points.LongDistanceKill != 0 && @event.Distance >= points.LongDistance)
 			ProcessPoints(attacker, points.LongDistanceKill, "k4.reason.longdistance", victimName);
 
 		// Weapon type bonuses - only process if any weapon bonus is configured
 		if (points.KnifeKill != 0 || points.TaserKill != 0 || points.GrenadeKill != 0 ||
 			points.InfernoKill != 0 || points.ImpactKill != 0)
 		{
-			var weapon = @event.Weapon?.ToLowerInvariant() ?? "";
-			var weaponType = Plugin.WeaponCache.GetWeaponType(@event.Weapon);
+			var weaponType = Plugin.WeaponCache.GetWeaponType(weapon);
 
 			if (weaponType == CSWeaponType.WEAPONTYPE_KNIFE && points.KnifeKill != 0)
 				ProcessPoints(attacker, points.KnifeKill, "k4.reason.knife", victimName);
@@ -188,13 +201,15 @@ public sealed class PlayerDeathHandler(PluginConfig config, PointsConfig points,
 			if (weaponType == CSWeaponType.WEAPONTYPE_TASER && points.TaserKill != 0)
 				ProcessPoints(attacker, points.TaserKill, "k4.reason.taser", victimName);
 
-			if (weapon.Contains("hegrenade") && points.GrenadeKill != 0)
+			if (points.GrenadeKill != 0 && weapon.Contains("hegrenade", StringComparison.OrdinalIgnoreCase))
 				ProcessPoints(attacker, points.GrenadeKill, "k4.reason.grenade", victimName);
 
-			if ((weapon.Contains("inferno") || weapon.Contains("molotov") || weapon.Contains("incgrenade")) && points.InfernoKill != 0)
+			if (points.InfernoKill != 0 && (weapon.Contains("inferno", StringComparison.OrdinalIgnoreCase) ||
+				weapon.Contains("molotov", StringComparison.OrdinalIgnoreCase) || weapon.Contains("incgrenade", StringComparison.OrdinalIgnoreCase)))
 				ProcessPoints(attacker, points.InfernoKill, "k4.reason.inferno", victimName);
 
-			if ((weapon.Contains("flashbang") || weapon.Contains("smokegrenade") || weapon.Contains("decoy")) && points.ImpactKill != 0)
+			if (points.ImpactKill != 0 && (weapon.Contains("flashbang", StringComparison.OrdinalIgnoreCase) ||
+				weapon.Contains("smokegrenade", StringComparison.OrdinalIgnoreCase) || weapon.Contains("decoy", StringComparison.OrdinalIgnoreCase)))
 				ProcessPoints(attacker, points.ImpactKill, "k4.reason.impact", victimName);
 		}
 	}
@@ -252,9 +267,6 @@ public sealed class PlayerDeathHandler(PluginConfig config, PointsConfig points,
 
 		modifyPoints(player, points, key, true, info);
 	}
-
-	private static bool IsValidPlayer([NotNullWhen(true)] IPlayer? player) =>
-		player?.IsValid == true && !player.IsFakeClient;
 
 	private double CalculateDynamicMultiplier(int playerPoints, int otherPoints)
 	{

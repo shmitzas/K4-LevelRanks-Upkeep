@@ -110,6 +110,7 @@
 | -------------- | -------------------- | ------------------------------------------- | ----------------------- |
 | **Database**   | `Connection`         | Database connection name                    | `"host"`                |
 |                | `TablePrefix`        | Prefix for this server's tables (see below) | `""`                    |
+|                | `TablePrefixPosition`| Attach the prefix `"before"` or `"after"` the table name | `"before"`  |
 |                | `PurgeDays`          | Days to keep inactive records (0 = forever) | `30`                    |
 | **Rank**       | `StartPoints`        | Starting points for new players             | `0`                     |
 |                | `MinPlayers`         | Minimum players for points to be awarded    | `4`                     |
@@ -201,21 +202,29 @@ database instead of needing a database each:
 {
   "Database": {
     "Connection": "host",
-    "TablePrefix": "awp_"
+    "TablePrefix": "awp_",
+    "TablePrefixPosition": "before"
   }
 }
 ```
 
-| `TablePrefix` | Tables used                                                                  |
-| ------------- | ---------------------------------------------------------------------------- |
-| `""`          | `lvl_base`, `lvl_base_settings`, `lvl_base_weapons`, `lvl_base_hits`         |
-| `"awp_"`      | `awp_lvl_base`, `awp_lvl_base_settings`, `awp_lvl_base_weapons`, `awp_lvl_base_hits` |
+`TablePrefixPosition` chooses which end of the table name the prefix is attached to:
 
-- The prefix is used **literally** - include the separator yourself (`"awp_"`, not `"awp"`).
-- Only letters, digits and underscores are allowed; anything else is rejected at startup.
-- Each prefix gets its own `VersionInfo` table, so prefixed servers create and upgrade
-  their schema independently of each other.
-- Changing the prefix points the server at a different (possibly empty) set of tables -
+| `TablePrefix` | `TablePrefixPosition` | Tables used                                                                        |
+| ------------- | --------------------- | ---------------------------------------------------------------------------------- |
+| `""`          | _(either)_            | `lvl_base`, `lvl_base_settings`, `lvl_base_weapons`, `lvl_base_hits`                 |
+| `"awp_"`      | `"before"`            | `awp_lvl_base`, `awp_lvl_base_settings`, `awp_lvl_base_weapons`, `awp_lvl_base_hits` |
+| `"awp"`       | `"after"`             | `lvl_base_awp`, `lvl_base_settings_awp`, `lvl_base_weapons_awp`, `lvl_base_hits_awp` |
+
+- `"before"` (the default) uses the prefix **literally** - include the separator yourself
+  (`"awp_"`, not `"awp"`).
+- `"after"` adds the separating underscore for you, so `"awp"`, `"awp_"` and `"_awp"` all
+  give `lvl_base_awp`.
+- Only letters, digits and underscores are allowed in the prefix, and the position must be
+  `"before"` or `"after"`; anything else is rejected at startup.
+- Index names carry the prefix the same way, and each prefix gets its own `VersionInfo`
+  table, so prefixed servers create and upgrade their schema independently of each other.
+- Changing either setting points the server at a different (possibly empty) set of tables -
   it does not move existing data. Rename the tables yourself if you want to keep it.
 - Takes effect on server restart.
 
@@ -241,6 +250,31 @@ it logs a warning that migrations could not be applied and carries on. Only if a
 required table is missing or unreadable does it disable itself, naming the tables in
 question so you can either grant the missing rights or create them by hand (the schema
 is LVL Ranks compatible, so an existing LVL Ranks database works as-is).
+
+### Saving
+
+- Changes are saved every 60 seconds, at each round end, at match end and on disconnect, by a
+  single background writer. Each changed player is written in one transaction covering all four
+  tables, with their latest absolute values; a player whose transaction fails is rolled back and
+  retried without holding up the others.
+- Writes are single-statement upserts keyed on the primary key (`ON DUPLICATE KEY UPDATE` on
+  MySQL/MariaDB, `ON CONFLICT ... DO UPDATE` on PostgreSQL 9.5+ and SQLite 3.24+), so two servers
+  sharing a table prefix no longer race on a player's first save. Tables created by hand need their
+  primary keys (`steam`; `steam, classname` for weapons; `SteamID` for hits) for this to work.
+- A player who disconnects (dead, spectating or alive) keeps their record in memory until it is
+  saved; reconnecting before then picks the unsaved progress back up instead of reloading the
+  database row.
+- If the database is unreachable, saves are retried with backoff (1 s up to 30 s) until they land.
+  The first failure is logged as a warning, repeated ones as errors. If it is still unreachable when
+  the plugin unloads (restart, hot reload), the plugin waits at most 8 seconds, then logs how many
+  players' unsaved progress was lost.
+- A player whose load fails is not tracked (no points) until a retry succeeds, at most about a
+  minute later; they are never given a fresh record over their real one.
+- `!resetmyrank` is written by the next save, which deletes the weapon and hit rows and writes the
+  zeroed main row in the same transaction.
+- Leaderboards (`!top`, `!toptime`) read the saved values, so they trail the live game by up to one
+  save. Both are indexed queries (`value`, `playtime`); the playtime index is created by a migration,
+  which a database user without `INDEX` rights skips with the usual warning.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

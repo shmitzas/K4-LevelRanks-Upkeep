@@ -19,8 +19,8 @@ public sealed partial class Plugin
 
 		private readonly string _connectionName;
 		private readonly string _tablePrefix;
+		private readonly string _tablePrefixPosition;
 		private readonly int _purgeDays;
-		private readonly int _startPoints;
 		private readonly ModuleConfig _modules;
 
 		/* ==================== Properties ==================== */
@@ -29,12 +29,12 @@ public sealed partial class Plugin
 
 		/* ==================== Constructor ==================== */
 
-		public DatabaseService(string connectionName, string tablePrefix, int purgeDays, int startPoints, ModuleConfig modules)
+		public DatabaseService(string connectionName, string tablePrefix, string tablePrefixPosition, int purgeDays, ModuleConfig modules)
 		{
 			_connectionName = connectionName;
 			_tablePrefix = tablePrefix;
+			_tablePrefixPosition = tablePrefixPosition;
 			_purgeDays = purgeDays;
-			_startPoints = startPoints;
 			_modules = modules;
 		}
 
@@ -46,7 +46,7 @@ public sealed partial class Plugin
 			{
 				// Both hooks are global and must be in place before the first query. Every
 				// public method here is gated on IsEnabled, which stays false until they are.
-				TableNames.Configure(_tablePrefix);
+				TableNames.Configure(_tablePrefix, _tablePrefixPosition);
 				DommelMapper.SetTableNameResolver(new PrefixedTableNameResolver());
 
 				using var connection = Core.Database.GetConnection(_connectionName);
@@ -57,7 +57,7 @@ public sealed partial class Plugin
 					// Must come before anything opens the connection: MySqlConnector strips
 					// the password from ConnectionString on open, and FluentMigrator builds
 					// its own connection from that string.
-					MigrationRunner.RunMigrations(connection);
+					MigrationRunner.RunMigrations(connection, Core.Database.GetConnectionInfo(_connectionName).Driver);
 				}
 				catch (Exception ex)
 				{
@@ -76,9 +76,16 @@ public sealed partial class Plugin
 				}
 
 				if (schemaError != null)
-					Core.Logger.LogWarning(schemaError,
-						"Schema migrations failed{Reason}, but every required table is already usable - continuing. Schema changes shipped by future plugin updates will not be applied until this is resolved.",
-						IsPermissionDenied(schemaError) ? " because the database user has no DDL permissions" : "");
+				{
+					if (IsPermissionDenied(schemaError))
+						Core.Logger.LogWarning(schemaError,
+							"Schema migrations failed because the database user has no DDL permissions, but every required table is already usable - continuing. Schema changes shipped by future plugin updates will not be applied until this is resolved.");
+					else
+						// Not an environment problem the operator chose: report it as the
+						// defect it is, even though the plugin can keep running.
+						Core.Logger.LogError(schemaError,
+							"Schema migrations failed, but every required table is already usable - continuing. Schema changes shipped by future plugin updates will not be applied until this is resolved.");
+				}
 
 				IsEnabled = true;
 
@@ -143,6 +150,11 @@ public sealed partial class Plugin
 		/// True when the failure is the database user lacking rights rather than a broken
 		/// schema, which is the difference between an actionable message and a stack trace.
 		/// </summary>
+		/// <remarks>
+		/// Only ever sees exceptions raised by FluentMigrator, which opens its own connection
+		/// through its own provider - Microsoft.Data.Sqlite on SQLite, not the
+		/// System.Data.SQLite connection SwiftlyS2 hands this plugin.
+		/// </remarks>
 		private static bool IsPermissionDenied(Exception? error)
 		{
 			for (var ex = error; ex != null; ex = ex.InnerException)
@@ -203,72 +215,6 @@ public sealed partial class Plugin
 			catch (Exception ex)
 			{
 				Core.Logger.LogError(ex, "Failed to purge old records");
-			}
-		}
-
-		public async Task ResetPlayerAsync(string steamId)
-		{
-			if (!IsEnabled)
-				return;
-
-			try
-			{
-				await ResetPlayerStatsAsync(steamId);
-				await ResetPlayerModuleDataAsync(steamId);
-			}
-			catch (Exception ex)
-			{
-				Core.Logger.LogError(ex, "Failed to reset player {Steam}", steamId);
-			}
-		}
-
-		private async Task ResetPlayerStatsAsync(string steamId)
-		{
-			using var connection = Core.Database.GetConnection(_connectionName);
-			connection.Open();
-
-			var player = await connection.GetAsync<PlayerData>(steamId);
-			if (player == null)
-				return;
-
-			// Reset all stats
-			player.Value = _startPoints;
-			player.Rank = 0;
-			player.Kills = 0;
-			player.Deaths = 0;
-			player.Shoots = 0;
-			player.Hits = 0;
-			player.Headshots = 0;
-			player.Assists = 0;
-			player.RoundWin = 0;
-			player.RoundLose = 0;
-			player.Playtime = 0;
-			player.GameWins = 0;
-			player.GameLosses = 0;
-			player.GamesPlayed = 0;
-			player.RoundsPlayed = 0;
-			player.Damage = 0;
-
-			await connection.UpdateAsync(player);
-		}
-
-		private async Task ResetPlayerModuleDataAsync(string steamId)
-		{
-			using var connection = Core.Database.GetConnection(_connectionName);
-			connection.Open();
-
-			if (_modules.WeaponStatsEnabled)
-			{
-				await connection.DeleteMultipleAsync<WeaponStatRecord>(w => w.Steam == steamId);
-			}
-
-			if (_modules.HitStatsEnabled)
-			{
-				var hitData = await connection.GetAsync<HitData>(steamId);
-				if (hitData != null)
-				{
-					await connection.DeleteAsync(hitData);
-				}
 			}
 		}
 	}

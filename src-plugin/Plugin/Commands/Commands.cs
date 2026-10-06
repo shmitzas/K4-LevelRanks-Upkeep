@@ -94,10 +94,12 @@ public sealed partial class Plugin
 
 		var localizer = Core.Translation.GetPlayerLocalizer(player);
 
+		// Native read: take it on the game thread, not inside Task.Run.
+		var steamId = player.SteamID.ToString();
+
 		// Show player's position in chat
 		Task.Run(async () =>
 		{
-			var steamId = player.SteamID.ToString();
 			var position = await Database.GetPlayerRankPositionAsync(steamId);
 			var totalPlayers = await Database.GetTotalPlayersAsync();
 
@@ -130,26 +132,15 @@ public sealed partial class Plugin
 		if (!ValidatePlayerData(player, data))
 			return;
 
-		Task.Run(async () => await ResetPlayerRankAsync(player, data!));
-	}
+		// Written by the next save pass, which also deletes the weapon/hit rows in the same transaction.
+		data!.Reset(Config.CurrentValue.Rank.StartPoints);
+		data.Rank = Ranks.GetRankId(data.Points);
+		PlayerData.RequestSave();
 
-	private async Task ResetPlayerRankAsync(IPlayer player, PlayerData data)
-	{
-		var steamId = player.SteamID.ToString();
-		await Database.ResetPlayerAsync(steamId);
+		UpdatePlayerClanTag(player, data);
 
-		data.Reset(Config.CurrentValue.Rank.StartPoints);
-
-		Core.Scheduler.NextWorldUpdate(() =>
-		{
-			if (!player.IsValid)
-				return;
-
-			UpdatePlayerClanTag(player, data);
-
-			var localizer = Core.Translation.GetPlayerLocalizer(player);
-			player.SendChat($"{localizer["k4.general.prefix"]} {localizer["k4.chat.rank.reset"]}");
-		});
+		var localizer = Core.Translation.GetPlayerLocalizer(player);
+		player.SendChat($"{localizer["k4.general.prefix"]} {localizer["k4.chat.rank.reset"]}");
 	}
 
 	private void OnToggleMessagesCommand(ICommandContext ctx)
@@ -196,10 +187,12 @@ public sealed partial class Plugin
 
 		var localizer = Core.Translation.GetPlayerLocalizer(player);
 
+		// Native read: take it on the game thread, not inside Task.Run.
+		var steamId = player.SteamID.ToString();
+
 		// Show player's position in chat
 		Task.Run(async () =>
 		{
-			var steamId = player.SteamID.ToString();
 			var position = await Database.GetPlayerRankPositionByTimeAsync(steamId);
 			var totalPlayers = await Database.GetTotalPlayersAsync();
 
@@ -259,7 +252,7 @@ public sealed partial class Plugin
 		}
 
 		data.Points = points;
-		data.IsDirty = true;
+		data.Rank = Ranks.GetRankId(data.Points);
 
 		UpdatePlayerClanTag(target, data);
 

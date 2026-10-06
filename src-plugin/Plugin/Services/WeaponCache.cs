@@ -14,6 +14,11 @@ public sealed partial class Plugin
 	{
 		/* ==================== Fields ==================== */
 
+		private const string ClassnamePrefix = "weapon_";
+
+		// Longest unprefixed name whose lookup key is built on the stack.
+		private const int MaxStackName = 64;
+
 		private static Dictionary<CSWeaponType, List<WeaponInfo>>? _weaponsByType;
 		private static Dictionary<ItemDefinitionIndex, WeaponInfo>? _weaponsByIndex;
 		private static Dictionary<string, WeaponInfo>? _weaponsByClassname;
@@ -41,28 +46,40 @@ public sealed partial class Plugin
 			if (IsInitialized)
 				return;
 
-			_weaponsByType = [];
-			_weaponsByIndex = [];
-			_weaponsByClassname = [];
+			// Built in locals and published at the end: menus and stat loads may read this
+			// cache from other threads and must never see a half-filled map.
+			var byType = new Dictionary<CSWeaponType, List<WeaponInfo>>();
+			var byIndex = new Dictionary<ItemDefinitionIndex, WeaponInfo>();
+			var byClassname = new Dictionary<string, WeaponInfo>(StringComparer.OrdinalIgnoreCase);
 
 			foreach (var type in Enum.GetValues<CSWeaponType>())
-				_weaponsByType[type] = [];
+				byType[type] = [];
 
 			foreach (var index in Enum.GetValues<ItemDefinitionIndex>())
-				ProcessWeaponIndex(index);
+				ProcessWeaponIndex(index, byType, byIndex, byClassname);
 
-			if (_weaponsByIndex.Count > 0)
-				Core.Logger.LogInformation("WeaponCache initialized: {Count} weapons cached", _weaponsByIndex.Count);
+			_weaponsByType = byType;
+			_weaponsByClassname = byClassname;
+
+			// Last: IsInitialized keys off this map.
+			Volatile.Write(ref _weaponsByIndex, byIndex);
+
+			if (byIndex.Count > 0)
+				Core.Logger.LogInformation("WeaponCache initialized: {Count} weapons cached", byIndex.Count);
 		}
 
-		private static void ProcessWeaponIndex(ItemDefinitionIndex index)
+		private static void ProcessWeaponIndex(
+			ItemDefinitionIndex index,
+			Dictionary<CSWeaponType, List<WeaponInfo>> byType,
+			Dictionary<ItemDefinitionIndex, WeaponInfo> byIndex,
+			Dictionary<string, WeaponInfo> byClassname)
 		{
 			var vdata = Core.Helpers.GetWeaponCSDataFromKey(index);
 			if (vdata == null)
 				return;
 
 			var enumName = index.ToString();
-			var classname = $"weapon_{ToSnakeCase(enumName)}";
+			var classname = $"{ClassnamePrefix}{ToSnakeCase(enumName)}";
 			var type = vdata.WeaponType;
 
 			var isPrimary = type is
@@ -82,9 +99,9 @@ public sealed partial class Plugin
 				IsSecondary = type == CSWeaponType.WEAPONTYPE_PISTOL
 			};
 
-			_weaponsByIndex![index] = info;
-			_weaponsByClassname![classname.ToLowerInvariant()] = info;
-			_weaponsByType![type].Add(info);
+			byIndex[index] = info;
+			byClassname[classname] = info;
+			byType[type].Add(info);
 		}
 
 		public static void Reset()
@@ -109,11 +126,23 @@ public sealed partial class Plugin
 
 			EnsureInitialized();
 
-			var key = classname.StartsWith("weapon_", StringComparison.OrdinalIgnoreCase)
-				? classname.ToLowerInvariant()
-				: $"weapon_{classname.ToLowerInvariant()}";
+			var map = _weaponsByClassname;
+			if (map == null)
+				return null;
 
-			return _weaponsByClassname?.TryGetValue(key, out var info) == true ? info : null;
+			// The map ignores case, so no lowercase copy is needed.
+			WeaponInfo? info;
+			if (classname.StartsWith(ClassnamePrefix, StringComparison.OrdinalIgnoreCase))
+				return map.TryGetValue(classname, out info) ? info : null;
+
+			if (classname.Length > MaxStackName)
+				return map.TryGetValue(ClassnamePrefix + classname, out info) ? info : null;
+
+			// Event weapon names carry no prefix ("ak47"); build "weapon_ak47" on the stack.
+			Span<char> key = stackalloc char[ClassnamePrefix.Length + classname.Length];
+			ClassnamePrefix.CopyTo(key);
+			classname.CopyTo(key[ClassnamePrefix.Length..]);
+			return map.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(key, out info) ? info : null;
 		}
 
 		public static IReadOnlyList<WeaponInfo> GetByType(CSWeaponType type)

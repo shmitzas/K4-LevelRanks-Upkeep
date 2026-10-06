@@ -24,7 +24,18 @@ public sealed class WeaponStat
 	public long Shots { get; set; }
 	public long Damage { get; set; }
 
-	public bool IsDirty { get; set; }
+	// Values the last committed save wrote; the stat is written again whenever it differs.
+	internal WeaponCounters Synced;
+
+	internal WeaponCounters ReadCounters() => new()
+	{
+		Kills = Kills,
+		Deaths = Deaths,
+		Headshots = Headshots,
+		Hits = Hits,
+		Shots = Shots,
+		Damage = Damage
+	};
 }
 
 // =========================================
@@ -32,11 +43,16 @@ public sealed class WeaponStat
 // =========================================
 
 /// <summary>
-/// Collection of weapon stats for a player (runtime)
+/// Collection of weapon stats for a player (runtime). Written on the game thread and
+/// snapshotted by the background save, so every access to the dictionary is locked.
 /// </summary>
 public sealed class PlayerWeaponStats
 {
 	private readonly Dictionary<string, WeaponStat> _stats = new(StringComparer.OrdinalIgnoreCase);
+	private readonly Lock _lock = new();
+
+	// Stats the save in flight carries, with the values written.
+	private List<(WeaponStat Stat, WeaponCounters Sent)>? _sent;
 
 	// =========================================
 	// =           ACCESSORS
@@ -47,62 +63,150 @@ public sealed class PlayerWeaponStats
 	{
 		var key = NormalizeWeaponName(weaponClassname);
 
-		if (!_stats.TryGetValue(key, out var stat))
+		lock (_lock)
 		{
-			var weaponInfo = Plugin.WeaponCache.GetByClassname(key);
-			stat = new WeaponStat
+			if (!_stats.TryGetValue(key, out var stat))
 			{
-				WeaponClassname = key,
-				WeaponType = weaponInfo?.Type ?? CSWeaponType.WEAPONTYPE_UNKNOWN
-			};
-			_stats[key] = stat;
-		}
+				var weaponInfo = Plugin.WeaponCache.GetByClassname(key);
+				stat = new WeaponStat
+				{
+					WeaponClassname = key,
+					WeaponType = weaponInfo?.Type ?? CSWeaponType.WEAPONTYPE_UNKNOWN
+				};
+				_stats[key] = stat;
+			}
 
-		return stat;
+			return stat;
+		}
 	}
 
 	/// <summary>Get weapon stat if exists</summary>
 	public WeaponStat? Get(string weaponClassname)
 	{
 		var key = NormalizeWeaponName(weaponClassname);
-		return _stats.TryGetValue(key, out var stat) ? stat : null;
+
+		lock (_lock)
+			return _stats.TryGetValue(key, out var stat) ? stat : null;
 	}
 
-	/// <summary>Get all weapon stats</summary>
-	public IReadOnlyCollection<WeaponStat> GetAll() => _stats.Values;
+	/// <summary>Snapshot of all weapon stats</summary>
+	public IReadOnlyCollection<WeaponStat> GetAll()
+	{
+		lock (_lock)
+			return [.. _stats.Values];
+	}
 
-	/// <summary>Get dirty (modified) stats</summary>
-	public IEnumerable<WeaponStat> GetDirty() => _stats.Values.Where(s => s.IsDirty);
+	// =========================================
+	// =           SAVE STATE
+	// =========================================
+
+	/// <summary>Rows for weapons changed since the last committed save; null when none did.</summary>
+	internal List<WeaponStatRecord>? BuildChanges(string steam)
+	{
+		lock (_lock)
+		{
+			List<WeaponStatRecord>? rows = null;
+			_sent = null;
+
+			foreach (var stat in _stats.Values)
+			{
+				var current = stat.ReadCounters();
+				if (current == stat.Synced)
+					continue;
+
+				(_sent ??= []).Add((stat, current));
+				(rows ??= []).Add(new WeaponStatRecord
+				{
+					Steam = steam,
+					Classname = stat.WeaponClassname,
+					Kills = current.Kills,
+					Deaths = current.Deaths,
+					Headshots = current.Headshots,
+					Hits = current.Hits,
+					Shots = current.Shots,
+					Damage = current.Damage
+				});
+			}
+
+			return rows;
+		}
+	}
+
+	internal void AcknowledgeSync()
+	{
+		lock (_lock)
+		{
+			if (_sent is null)
+				return;
+
+			foreach (var (stat, sent) in _sent)
+				stat.Synced = sent;
+
+			_sent = null;
+		}
+	}
+
+	internal bool HasPendingChanges()
+	{
+		lock (_lock)
+		{
+			foreach (var stat in _stats.Values)
+			{
+				if (stat.ReadCounters() != stat.Synced)
+					return true;
+			}
+
+			return false;
+		}
+	}
+
+	internal void MarkSynced()
+	{
+		lock (_lock)
+		{
+			foreach (var stat in _stats.Values)
+				stat.Synced = stat.ReadCounters();
+		}
+	}
 
 	// =========================================
 	// =           MANAGEMENT
 	// =========================================
 
 	/// <summary>Clear all stats</summary>
-	public void Clear() => _stats.Clear();
+	public void Clear()
+	{
+		lock (_lock)
+		{
+			_stats.Clear();
+			_sent = null;
+		}
+	}
 
 	/// <summary>Load from database records</summary>
 	public void LoadFrom(IEnumerable<WeaponStatRecord> records)
 	{
-		_stats.Clear();
-
-		foreach (var record in records)
+		lock (_lock)
 		{
-			var weaponInfo = Plugin.WeaponCache.GetByClassname(record.Classname);
-			var stat = new WeaponStat
-			{
-				WeaponClassname = record.Classname,
-				WeaponType = weaponInfo?.Type ?? CSWeaponType.WEAPONTYPE_UNKNOWN,
-				Kills = record.Kills,
-				Deaths = record.Deaths,
-				Headshots = record.Headshots,
-				Hits = record.Hits,
-				Shots = record.Shots,
-				Damage = record.Damage,
-				IsDirty = false
-			};
+			_stats.Clear();
 
-			_stats[record.Classname] = stat;
+			foreach (var record in records)
+			{
+				var weaponInfo = Plugin.WeaponCache.GetByClassname(record.Classname);
+				var stat = new WeaponStat
+				{
+					WeaponClassname = record.Classname,
+					WeaponType = weaponInfo?.Type ?? CSWeaponType.WEAPONTYPE_UNKNOWN,
+					Kills = record.Kills,
+					Deaths = record.Deaths,
+					Headshots = record.Headshots,
+					Hits = record.Hits,
+					Shots = record.Shots,
+					Damage = record.Damage
+				};
+
+				_stats[record.Classname] = stat;
+			}
 		}
 	}
 
