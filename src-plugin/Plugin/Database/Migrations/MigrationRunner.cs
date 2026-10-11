@@ -63,19 +63,19 @@ public static class MigrationRunner
 					$"Unsupported database driver '{driver}'. Supported drivers are mysql, postgresql and sqlite.");
 		}
 
-		// Without its own ledger a prefixed install shares VersionInfo with every other
-		// prefix in the database, sees all migrations as already applied, and never gets
-		// its tables created. Left alone when unprefixed so existing installs keep
+		// Without its own ledger an affixed install shares VersionInfo with every other
+		// affix in the database, sees all migrations as already applied, and never gets
+		// its tables created. Left alone when unaffixed so existing installs keep
 		// FluentMigrator's own default verbatim.
-		if (TableNames.HasPrefix)
-			rb.WithVersionTable(new PrefixedVersionTableMetaData());
+		if (TableNames.HasAffix)
+			rb.WithVersionTable(new AffixedVersionTableMetaData());
 	}
 
 	/// <summary>
-	/// Mirrors FluentMigrator's own defaults, with the prefix applied to the two
+	/// Mirrors FluentMigrator's own defaults, with the affixes applied to the two
 	/// identifiers that are not scoped to the table itself.
 	/// </summary>
-	private sealed class PrefixedVersionTableMetaData : IVersionTableMetaData
+	private sealed class AffixedVersionTableMetaData : IVersionTableMetaData
 	{
 		public string SchemaName => "";
 		public string TableName => TableNames.VersionInfo;

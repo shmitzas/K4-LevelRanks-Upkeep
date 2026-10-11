@@ -10,7 +10,7 @@ namespace K4Ranks;
 
 [PluginMetadata(
 	Id = "k4.levelranks",
-	Version = "1.4.0",
+	Version = "1.5.0",
 	Name = "K4 - Level Ranks",
 	Author = "K4ryuu, Shmitz",
 	Description = "Experience-based ranking system with configurable ranks, detailed player statistics, weapon tracking, and hit analysis for CS2."
@@ -65,6 +65,7 @@ public sealed partial class Plugin(ISwiftlyCore core) : BasePlugin(core)
 		Database = new DatabaseService(
 			Config.CurrentValue.Database.Connection,
 			Config.CurrentValue.Database.TablePrefix,
+			Config.CurrentValue.Database.TableSuffix,
 			Config.CurrentValue.Database.TablePrefixPosition,
 			Config.CurrentValue.Database.PurgeDays,
 			Modules.CurrentValue

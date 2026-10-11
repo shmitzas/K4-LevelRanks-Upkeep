@@ -20,17 +20,23 @@ public sealed class DatabaseSettings
 	public string Connection { get; set; } = "host";
 
 	/// <summary>
-	/// Optional prefix applied to every table this plugin owns, so several servers can
-	/// share one database (e.g. "awp_" gives awp_lvl_base). Empty keeps the stock LVL
-	/// Ranks names. Letters, digits and underscores only.
+	/// Optional prefix applied to every table this plugin owns, so several servers can share
+	/// one database ("awp" gives awp_lvl_base). Empty keeps the stock LVL Ranks names.
+	/// Letters, digits and underscores only; the separating underscore is added for you.
 	/// </summary>
 	public string TablePrefix { get; set; } = "";
 
 	/// <summary>
-	/// Where <see cref="TablePrefix"/> is attached: "before" gives awp_lvl_base and uses
-	/// the value verbatim, "after" gives lvl_base_awp and adds the underscore itself.
+	/// Optional suffix applied to the same tables ("awp" gives lvl_base_awp). Can be combined
+	/// with <see cref="TablePrefix"/>; same rules apply.
 	/// </summary>
-	public string TablePrefixPosition { get; set; } = "before";
+	public string TableSuffix { get; set; } = "";
+
+	/// <summary>
+	/// Retired in favour of <see cref="TableSuffix"/>. Still read so that an upgrade which
+	/// leaves it set fails loudly instead of quietly switching to a different set of tables.
+	/// </summary>
+	public string TablePrefixPosition { get; set; } = "";
 
 	/// <summary>Days to keep inactive player records (0 = forever)</summary>
 	public int PurgeDays { get; set; } = 30;
@@ -116,14 +122,23 @@ public sealed class PointSystemSettings
 	/// <summary>Show killer/victim names in point messages</summary>
 	public bool ShowPlayerNames { get; set; } = false;
 
-	/// <summary>Dynamic points based on victim/attacker point ratio</summary>
-	public bool DynamicDeathPoints { get; set; } = true;
+	/// <summary>Scale the death penalty by the point gap: dying to a weaker player costs more</summary>
+	public bool DynamicDeathPoints { get; set; } = false;
 
-	/// <summary>Minimum multiplier for dynamic death points</summary>
+	/// <summary>Death multiplier against the strongest possible attacker (expected 0-1)</summary>
 	public double DynamicDeathPointsMin { get; set; } = 0.5;
 
-	/// <summary>Maximum multiplier for dynamic death points</summary>
+	/// <summary>Death multiplier against the weakest possible attacker (expected 1+)</summary>
 	public double DynamicDeathPointsMax { get; set; } = 3.0;
+
+	/// <summary>Scale the kill reward by the point gap: killing a stronger player pays more</summary>
+	public bool DynamicKillPoints { get; set; } = false;
+
+	/// <summary>Kill multiplier against the weakest possible victim; raise toward 1.0 if the mid-table earns too slowly (expected 0-1)</summary>
+	public double DynamicKillPointsMin { get; set; } = 0.5;
+
+	/// <summary>Kill multiplier against the strongest possible victim (expected 1+)</summary>
+	public double DynamicKillPointsMax { get; set; } = 3.0;
 }
 
 /* ==================== VIP ==================== */

@@ -110,7 +110,7 @@
 | -------------- | -------------------- | ------------------------------------------- | ----------------------- |
 | **Database**   | `Connection`         | Database connection name                    | `"host"`                |
 |                | `TablePrefix`        | Prefix for this server's tables (see below) | `""`                    |
-|                | `TablePrefixPosition`| Attach the prefix `"before"` or `"after"` the table name | `"before"`  |
+|                | `TableSuffix`        | Suffix for this server's tables (see below) | `""`                    |
 |                | `PurgeDays`          | Days to keep inactive records (0 = forever) | `30`                    |
 | **Rank**       | `StartPoints`        | Starting points for new players             | `0`                     |
 |                | `MinPlayers`         | Minimum players for points to be awarded    | `4`                     |
@@ -122,10 +122,36 @@
 |                | `UseRanks`           | Show competitive ranks                      | `true`                  |
 |                | `RankMode`           | 1=Premier, 2=Competitive, 3=Wingman, 4=DZ   | `1`                     |
 | **Points**     | `RoundEndSummary`    | Show summary instead of per-action messages | `false`                 |
-|                | `DynamicDeathPoints` | Dynamic multiplier based on point ratio     | `true`                  |
+|                | `DynamicDeathPoints` | Scale the death penalty by the point gap    | `false`                 |
+|                | `DynamicDeathPointsMin` / `...Max` | Death multiplier bounds       | `0.5` / `3.0`           |
+|                | `DynamicKillPoints`  | Scale the kill reward by the point gap      | `false`                 |
+|                | `DynamicKillPointsMin` / `...Max` | Kill multiplier bounds         | `0.5` / `3.0`           |
 |                | `ShowPlayerNames`    | Show player names in point messages         | `false`                 |
 | **VIP**        | `Multiplier`         | Point multiplier for VIP                    | `1.25`                  |
 |                | `Flags`              | Permission flags for VIP status             | `["k4-levelranks.vip"]` |
+
+#### Dynamic kill and death points
+
+Both sides are **off by default** - set `DynamicDeathPoints` and/or `DynamicKillPoints`
+to `true` to enable them.
+
+Dying to a much weaker player hurts more; dying to a much stronger one hurts less.
+Killing a much stronger player pays more; killing a much weaker one pays less. Both
+sides read the same point gap and differ only in the bounds they use, so either can
+be tuned or turned off on its own.
+
+An even matchup always scores exactly the configured `Kill` / `Death` value. With the
+stock `8` / `-5` and `0.5` / `3.0` bounds:
+
+| Matchup                      | Attacker gets | Victim loses |
+| ---------------------------- | ------------- | ------------ |
+| Equal points                 | `8`           | `5`          |
+| 900 points kills 1000        | `10`          | `6`          |
+| 50 points kills 10000        | `24`          | `15`         |
+| 10000 points kills 50        | `4`           | `3`          |
+
+Bots and players whose record has not loaded are not scaled - there is no counterparty
+to compare against, so the configured value applies as-is.
 
 ### `points.json` - Point Values
 
@@ -191,37 +217,43 @@ The plugin uses LVL Ranks compatible database tables:
 - `lvl_base_weapons` - Weapon statistics (optional)
 - `lvl_base_hits` - Hit statistics (optional)
 
-### Separate Ranks per Server (`TablePrefix`)
+### Separate Ranks per Server (`TablePrefix` / `TableSuffix`)
 
-By default `TablePrefix` is empty and the table names above are used as-is.
+By default both are empty and the table names above are used as-is.
 
-Set it to give a server its own set of tables so several game modes can share one
+Set either to give a server its own set of tables so several game modes can share one
 database instead of needing a database each:
 
 ```json
 {
   "Database": {
     "Connection": "host",
-    "TablePrefix": "awp_",
-    "TablePrefixPosition": "before"
+    "TablePrefix": "awp",
+    "TableSuffix": ""
   }
 }
 ```
 
-`TablePrefixPosition` chooses which end of the table name the prefix is attached to:
+| `TablePrefix` | `TableSuffix` | Tables used                                                                        |
+| ------------- | ------------- | ---------------------------------------------------------------------------------- |
+| `""`          | `""`          | `lvl_base`, `lvl_base_settings`, `lvl_base_weapons`, `lvl_base_hits`                 |
+| `"awp"`       | `""`          | `awp_lvl_base`, `awp_lvl_base_settings`, `awp_lvl_base_weapons`, `awp_lvl_base_hits` |
+| `""`          | `"awp"`       | `lvl_base_awp`, `lvl_base_settings_awp`, `lvl_base_weapons_awp`, `lvl_base_hits_awp` |
+| `"awp"`       | `"2v2"`       | `awp_lvl_base_2v2`, `awp_lvl_base_settings_2v2`, ...                                 |
 
-| `TablePrefix` | `TablePrefixPosition` | Tables used                                                                        |
-| ------------- | --------------------- | ---------------------------------------------------------------------------------- |
-| `""`          | _(either)_            | `lvl_base`, `lvl_base_settings`, `lvl_base_weapons`, `lvl_base_hits`                 |
-| `"awp_"`      | `"before"`            | `awp_lvl_base`, `awp_lvl_base_settings`, `awp_lvl_base_weapons`, `awp_lvl_base_hits` |
-| `"awp"`       | `"after"`             | `lvl_base_awp`, `lvl_base_settings_awp`, `lvl_base_weapons_awp`, `lvl_base_hits_awp` |
+- Both can be set at once; neither excludes the other.
+- **The separating underscore is added for you**, so `"awp"`, `"awp_"` and `"_awp"` all name
+  the same tables. Tidying the value later is therefore a no-op rather than a silent move to
+  an empty set of tables.
+- Only letters, digits and underscores are allowed; anything else is rejected at startup.
+- Changing either value points the server at a different set of tables. Nothing is renamed
+  or migrated for you.
 
-- `"before"` (the default) uses the prefix **literally** - include the separator yourself
-  (`"awp_"`, not `"awp"`).
-- `"after"` adds the separating underscore for you, so `"awp"`, `"awp_"` and `"_awp"` all
-  give `lvl_base_awp`.
-- Only letters, digits and underscores are allowed in the prefix, and the position must be
-  `"before"` or `"after"`; anything else is rejected at startup.
+> **Upgrading from v1.4.0 or earlier.** `TablePrefixPosition` is gone. Use `TablePrefix` for
+> `awp_lvl_base` or `TableSuffix` for `lvl_base_awp`, then delete the old key - leaving it set
+> alongside a prefix stops the plugin at startup. A prefix that did not already end in `_`
+> (`"awp"` gave `awplvl_base`) now resolves differently; the plugin logs a warning naming both
+> table names, and you will need to rename the old tables to keep that data.
 - Index names carry the prefix the same way, and each prefix gets its own `VersionInfo`
   table, so prefixed servers create and upgrade their schema independently of each other.
 - Changing either setting points the server at a different (possibly empty) set of tables -

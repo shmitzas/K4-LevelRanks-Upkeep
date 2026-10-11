@@ -19,7 +19,8 @@ public sealed partial class Plugin
 
 		private readonly string _connectionName;
 		private readonly string _tablePrefix;
-		private readonly string _tablePrefixPosition;
+		private readonly string _tableSuffix;
+		private readonly string _retiredPrefixPosition;
 		private readonly int _purgeDays;
 		private readonly ModuleConfig _modules;
 
@@ -29,11 +30,12 @@ public sealed partial class Plugin
 
 		/* ==================== Constructor ==================== */
 
-		public DatabaseService(string connectionName, string tablePrefix, string tablePrefixPosition, int purgeDays, ModuleConfig modules)
+		public DatabaseService(string connectionName, string tablePrefix, string tableSuffix, string retiredPrefixPosition, int purgeDays, ModuleConfig modules)
 		{
 			_connectionName = connectionName;
 			_tablePrefix = tablePrefix;
-			_tablePrefixPosition = tablePrefixPosition;
+			_tableSuffix = tableSuffix;
+			_retiredPrefixPosition = retiredPrefixPosition;
 			_purgeDays = purgeDays;
 			_modules = modules;
 		}
@@ -46,8 +48,10 @@ public sealed partial class Plugin
 			{
 				// Both hooks are global and must be in place before the first query. Every
 				// public method here is gated on IsEnabled, which stays false until they are.
-				TableNames.Configure(_tablePrefix, _tablePrefixPosition);
-				DommelMapper.SetTableNameResolver(new PrefixedTableNameResolver());
+				TableNames.Configure(_tablePrefix, _tableSuffix, _retiredPrefixPosition);
+				DommelMapper.SetTableNameResolver(new AffixedTableNameResolver());
+
+				WarnIfPrefixMeaningChanged();
 
 				using var connection = Core.Database.GetConnection(_connectionName);
 
@@ -186,6 +190,23 @@ public sealed partial class Plugin
 				tables.Add(TableNames.Hits);
 
 			return tables;
+		}
+
+		/// <summary>
+		/// v1.4.0 and earlier used the prefix verbatim, so "awp" named awplvl_base. The
+		/// separator is supplied now, which silently points such an install at an empty
+		/// table set - the one case the operator has to act on, so say it out loud.
+		/// </summary>
+		private void WarnIfPrefixMeaningChanged()
+		{
+			var legacy = (_tablePrefix ?? "").Trim() + "lvl_base";
+
+			if (legacy == "lvl_base" || legacy == TableNames.Base)
+				return;
+
+			Core.Logger.LogWarning(
+				"Database.TablePrefix '{Prefix}' now resolves to {Table}; before v1.5.0 it resolved to {Legacy}. Rename the old tables, or ignore this on a fresh install.",
+				_tablePrefix, TableNames.Base, legacy);
 		}
 
 		private void LogInitializedTables()

@@ -56,6 +56,9 @@ public sealed class PlayerDeathHandler(PluginConfig config, PointsConfig points,
 		var isBotKill = victimEntry?.IsBot ?? victim?.IsFakeClient ?? false;
 		var isValidKill = !isSuicide && !isTeamKill && (!isBotKill || config.Rank.PointsForBots);
 
+		// Read before the victim's deduction lands, so both sides scale from the same matchup.
+		var matchupDelta = MatchupDelta(victimData, attackerData);
+
 		// =========================================
 		// =           VICTIM PROCESSING
 		// =========================================
@@ -70,7 +73,8 @@ public sealed class PlayerDeathHandler(PluginConfig config, PointsConfig points,
 			else if (!isTeamKill)
 			{
 				// Normal death
-				var multiplier = CalculateDynamicMultiplier(victimData.Points, attackerData?.Points ?? 0);
+				var multiplier = DynamicMultiplier(matchupDelta, livePoints.DynamicDeathPoints,
+					livePoints.DynamicDeathPointsMin, livePoints.DynamicDeathPointsMax);
 				var deathPoints = (int)Math.Round(points.Death * multiplier);
 				var attackerName = wantNames ? attackerController?.PlayerName : null;
 
@@ -98,7 +102,8 @@ public sealed class PlayerDeathHandler(PluginConfig config, PointsConfig points,
 			else if (isValidKill)
 			{
 				// Normal kill
-				var multiplier = CalculateDynamicMultiplier(attackerData.Points, victimData?.Points ?? 0);
+				var multiplier = DynamicMultiplier(matchupDelta, livePoints.DynamicKillPoints,
+					livePoints.DynamicKillPointsMin, livePoints.DynamicKillPointsMax);
 				var killPoints = (int)Math.Round(points.Kill * multiplier);
 
 				ProcessPoints(attacker!, killPoints, "k4.reason.kill", victimName);
@@ -268,12 +273,30 @@ public sealed class PlayerDeathHandler(PluginConfig config, PointsConfig points,
 		modifyPoints(player, points, key, true, info);
 	}
 
-	private double CalculateDynamicMultiplier(int playerPoints, int otherPoints)
+	/// <summary>
+	/// How much stronger the victim is than the attacker, in [-1, +1]; null when either side
+	/// has no loaded record, since a bot is not a counterparty to compare against.
+	/// </summary>
+	private static double? MatchupDelta(PlayerData? victimData, PlayerData? attackerData)
 	{
-		if (!config.Points.DynamicDeathPoints || otherPoints <= 0)
+		if (victimData?.IsLoaded != true || attackerData?.IsLoaded != true)
+			return null;
+
+		// Dividing by the attacker alone explodes when they sit near zero - the exact
+		// fresh-player case this exists for. Clamp covers points driven negative.
+		var scale = Math.Max(Math.Max(victimData.Points, attackerData.Points), 1);
+		return Math.Clamp((double)(victimData.Points - attackerData.Points) / scale, -1.0, 1.0);
+	}
+
+	/// <summary>
+	/// Multiplier for one side of the kill. Pinned at 1.0 for an even matchup so the configured
+	/// point value applies as-is; a stronger victim pulls toward <paramref name="max"/>.
+	/// </summary>
+	private static double DynamicMultiplier(double? delta, bool enabled, double min, double max)
+	{
+		if (!enabled || delta is not double d)
 			return 1.0;
 
-		var ratio = (double)otherPoints / Math.Max(playerPoints, 1);
-		return Math.Clamp(ratio, config.Points.DynamicDeathPointsMin, config.Points.DynamicDeathPointsMax);
+		return d >= 0 ? 1.0 + d * (max - 1.0) : 1.0 + d * (1.0 - min);
 	}
 }

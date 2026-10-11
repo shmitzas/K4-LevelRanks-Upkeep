@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.5.0]
+
+### Added
+
+- **Dynamic kill points**: killing a stronger player pays more, killing a weaker one pays less
+  - New `Points.DynamicKillPoints`, `DynamicKillPointsMin` and `DynamicKillPointsMax`, off by default
+  - The death side keeps its own `DynamicDeathPoints*` options, so either can be tuned alone
+- **Table suffix**: new `Database.TableSuffix` option gives `lvl_base_awp`, and pairs with `TablePrefix` for `awp_lvl_base_2v2`
+
+### Changed
+
+- **Dynamic death points are now off by default**: set `Points.DynamicDeathPoints` to `true` to keep scaling the death penalty by the point gap
+- **`Database.TablePrefixPosition` replaced by `TableSuffix`**: a config that still sets it alongside a prefix is rejected at startup
+  - If you used `"after"`, move the value to `TableSuffix` and clear `TablePrefix`; existing tables keep their names
+- **`TablePrefix` now adds the separating underscore for you**, so `"awp"` and `"awp_"` both give `awp_lvl_base`
+  - A prefix that did not already end in `_` names different tables now; startup logs a warning with both names
+
+### Fixed
+
+- **Dynamic death points were backwards**: being killed by a weaker player cost less instead of more
+- **Dynamic multipliers swung to the cap on a small point gap**; an evenly matched kill now scores the configured `Kill` / `Death` value exactly
+
+### Usage Example
+
+**Points (`config.json`)** - both toggles are `false` by default:
+
+```jsonc
+{
+  "K4Ranks": {
+    // ... other settings ...
+    "Points": {
+      "DynamicDeathPoints": true,     // Dying to a weaker player costs more
+      "DynamicDeathPointsMin": 0.5,   // Death multiplier vs the strongest possible attacker
+      "DynamicDeathPointsMax": 3.0,   // Death multiplier vs the weakest possible attacker
+      "DynamicKillPoints": true,      // Killing a stronger player pays more
+      "DynamicKillPointsMin": 0.5,    // Kill multiplier vs the weakest possible victim
+      "DynamicKillPointsMax": 3.0     // Kill multiplier vs the strongest possible victim
+    }
+  }
+}
+```
+
+With the stock `Kill` 8 / `Death` -5: an even matchup scores 8 / 5, a 50-point player killing a 10000-point one earns 24 while the victim loses 15, and the reverse pays 4 for a loss of 3.
+
+**Tables (`config.json`)** - both affixes are empty by default:
+
+```jsonc
+{
+  "K4Ranks": {
+    // ... other settings ...
+    "Database": {
+      "Connection": "host",
+      "TablePrefix": "awp",    // awp_lvl_base, awp_lvl_base_settings, ...
+      "TableSuffix": "2v2"     // awp_lvl_base_2v2 - both sides can be set at once
+    }
+  }
+}
+```
+
 ## [v1.4.0]
 
 ### Added
