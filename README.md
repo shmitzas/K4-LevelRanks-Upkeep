@@ -1,7 +1,10 @@
 <a name="readme-top"></a>
-
 <div align="center">
-  <h1 align="center">KitsuneLab©</h1>
+  <h3 align="center">NO LONGER MAINTAINED!!!<br>More optimized and more feature-rich version which will be maintained is this</h3>
+<h1 align="center"><a href="https://github.com/SwiftlyS2-Plugins/Ranks">Official SwitftlyS2 Ranks system</h3>
+
+  
+<div align="center">
   <h3 align="center">K4-LevelRanks</h3>
   <a align="center">A comprehensive ranking and statistics system for Counter-Strike 2. Features point-based progression, detailed player statistics, weapon tracking, and LVL Ranks database compatibility.</a>
 </div>
